@@ -28,11 +28,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
 
         <Sidebar />
-        <main className={cn(
-          "flex-1 overflow-y-auto transition-transform duration-1000",
-          (isDrift || isCriticalStasis) ? "pt-8" : ""
-        )}>
-          <div className="h-full p-4 lg:p-6">{children}</div>
+        <main className="flex-1 overflow-y-auto transition-transform duration-1000">
+          <div className="h-full px-4 pt-3 pb-4 lg:px-6 lg:pt-4 lg:pb-6">{children}</div>
         </main>
         
         <CommandPalette />
