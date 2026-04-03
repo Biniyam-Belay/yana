@@ -1,5 +1,14 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Supabase
+
+The app now has a Supabase-ready schema in `supabase/schema.sql` and shared client helpers in `src/lib/supabase/`.
+
+1. Copy `.env.example` to `.env.local` and fill in your Supabase project values.
+2. Apply `supabase/schema.sql` in the Supabase SQL editor or as your migration seed.
+3. The schema enables RLS and syncs `auth.users` into the public `users` profile table.
+4. Import `createSupabaseBrowserClient` or `createSupabaseServerClient` from `src/lib/supabase/` when wiring pages to the database.
+
 ## Getting Started
 
 First, run the development server:
