@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAppStore } from "@/store";
 import {
@@ -16,7 +16,6 @@ import {
   LayoutDashboard,
   Target,
   Briefcase,
-  ListChecks,
   Wallet,
   Heart,
   BookOpen,
@@ -24,20 +23,18 @@ import {
   FileText,
   DollarSign,
   Dumbbell,
+  CheckSquare,
 } from "lucide-react";
+import { useNorthStar } from "@/store/north-star";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 const navigationCommands = [
-  { label: "HUD — Dashboard", href: "/", icon: LayoutDashboard },
+  { label: "HUD — Dashboard", href: "/overview", icon: LayoutDashboard },
   { label: "North Star — Strategic Goals", href: "/north-star", icon: Target },
   {
     label: "Professional — Business & Work",
     href: "/professional",
     icon: Briefcase,
-  },
-  {
-    label: "Tactical — Daily Execution",
-    href: "/tactical",
-    icon: ListChecks,
   },
   {
     label: "Financial — Capital & Assets",
@@ -62,6 +59,40 @@ const quickActions = [
 export function CommandPalette() {
   const router = useRouter();
   const { commandPaletteOpen, setCommandPaletteOpen } = useAppStore();
+  const { objectives } = useNorthStar();
+  const [tasks, setTasks] = useState<{ id: string; title: string; status: string }[]>([]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    
+    async function fetchTasks() {
+      // Load from local storage as baseline
+      try {
+        const local = localStorage.getItem("yana_professional_tasks");
+        if (local) {
+          const parsed = JSON.parse(local);
+          if (Array.isArray(parsed)) setTasks(parsed);
+        }
+      } catch (e) {}
+
+      // Try syncing with Supabase
+      try {
+        const supabase = createSupabaseBrowserClient();
+        const { data: userRecord } = await supabase.auth.getUser();
+        if (userRecord?.user) {
+          const { data } = await supabase
+            .from("professional_tasks")
+            .select("id, title, status");
+          if (data && data.length > 0) {
+            // Merge or overwrite (Supabase is source of truth here if active)
+            setTasks(data);
+          }
+        }
+      } catch (e) {}
+    }
+    
+    fetchTasks();
+  }, [commandPaletteOpen]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -80,8 +111,22 @@ export function CommandPalette() {
   };
 
   const handleAction = (action: string) => {
-    // Placeholder — will route to specific creation flows
-    console.log("Quick action:", action);
+    switch (action) {
+      case "create-task":
+        router.push("/professional?action=create-task");
+        break;
+      case "log-transaction":
+        router.push("/financial?action=log-transaction&type=income");
+        break;
+      case "log-workout":
+        router.push("/biometrics?action=log-workout");
+        break;
+      case "new-vault-entry":
+        router.push("/vault?action=new-entry");
+        break;
+      default:
+        break;
+    }
     setCommandPaletteOpen(false);
   };
 
@@ -110,7 +155,7 @@ export function CommandPalette() {
           {quickActions.map((cmd) => (
             <CommandItem
               key={cmd.action}
-              value={cmd.label}
+              value={`Create ${cmd.label}`} // Helps search matching
               onSelect={() => handleAction(cmd.action)}
             >
               <cmd.icon className="mr-2 h-4 w-4 text-muted-foreground" />
@@ -118,6 +163,42 @@ export function CommandPalette() {
             </CommandItem>
           ))}
         </CommandGroup>
+
+        {objectives && objectives.length > 0 && (
+          <>
+            <CommandSeparator />
+            <CommandGroup heading="Projects & Objectives">
+              {objectives.map((obj) => (
+                <CommandItem
+                  key={obj.id}
+                  value={`Project Objective ${obj.title}`}
+                  onSelect={() => handleNavigation("/north-star")}
+                >
+                  <Target className="mr-2 h-4 w-4 text-emerald-500" />
+                  <span>{obj.title}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </>
+        )}
+
+        {tasks && tasks.length > 0 && (
+          <>
+            <CommandSeparator />
+            <CommandGroup heading="Tasks (Active)">
+              {tasks.filter((t: any) => t.status !== "done").slice(0, 15).map((t: any) => (
+                <CommandItem
+                  key={t.id}
+                  value={`Task ${t.title}`}
+                  onSelect={() => handleNavigation("/professional")}
+                >
+                  <CheckSquare className="mr-2 h-4 w-4 text-amber-500" />
+                  <span className="truncate">{t.title}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </>
+        )}
       </CommandList>
     </CommandDialog>
   );

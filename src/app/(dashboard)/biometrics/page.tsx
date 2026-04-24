@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { 
   Heart, Dumbbell, Apple, Plus, Clock, ShieldCheck, Activity, 
   CheckCircle2, Circle, ArrowUpRight, Trash2, Check, X,
@@ -11,6 +12,8 @@ import {
   AreaChart, Area, XAxis, ResponsiveContainer, CartesianGrid, Tooltip as RechartsTooltip
 } from "recharts";
 import { cn } from "@/lib/utils";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import type { BiometricProtocolRow, BiometricIntakeRow, BiometricRow } from "@/lib/supabase/types";
 
 // ─── TYPES ───
 interface ProtocolNode {
@@ -29,31 +32,12 @@ interface IntakeNode {
   protein: number;
 }
 
-const uid = () => Math.random().toString(36).slice(2, 9);
+const uid = () => (typeof crypto !== "undefined" && "randomUUID" in crypto
+  ? crypto.randomUUID()
+  : Math.random().toString(36).slice(2, 11));
 
 // ─── DATA ───
-const INITIAL_PROTOCOL: ProtocolNode[] = [
-  { id: "1", name: "Barbell Back Squat", weight: 140, sets: 4, reps: 8, completed: true },
-  { id: "2", name: "Romanian Deadlift", weight: 120, sets: 3, reps: 10, completed: false },
-  { id: "3", name: "Weighted Pull-ups", weight: 20, sets: 4, reps: 8, completed: true },
-  { id: "4", name: "Overhead Press", weight: 60, sets: 3, reps: 10, completed: false },
-];
-
-const INITIAL_INTAKE: IntakeNode[] = [
-  { id: "1", name: "Post-Workout Mix", calories: 450, protein: 50 },
-  { id: "2", name: "Steak & Rice", calories: 850, protein: 65 },
-  { id: "3", name: "Greek Yogurt Bowl", calories: 250, protein: 25 },
-];
-
-const RECOVERY_DATA = [
-  { day: 'Mon', recovery: 85, strain: 45 },
-  { day: 'Tue', recovery: 62, strain: 88 },
-  { day: 'Wed', recovery: 45, strain: 92 },
-  { day: 'Thu', recovery: 78, strain: 55 },
-  { day: 'Fri', recovery: 92, strain: 30 },
-  { day: 'Sat', recovery: 88, strain: 75 },
-  { day: 'Sun', recovery: 72, strain: 80 },
-];
+const RECOVERY_DATA: { day: string; recovery: number; strain: number }[] = [];
 
 // ─── SHARED UI ───
 function InlineInput({ placeholder, onSubmit, onCancel }: { placeholder: string; onSubmit: (v: string) => void; onCancel: () => void }) {
@@ -112,13 +96,56 @@ function NorthStarStrip() {
   );
 }
 
-export default function BiometricsPage() {
+function BiometricsPageContent() {
+  const searchParams = useSearchParams();
   const { northStar, topObjective, northStarKRs, avgProgress, objectives } = useNorthStar();
-  const [protocols, setProtocols] = useState(INITIAL_PROTOCOL);
-  const [intake, setIntake] = useState(INITIAL_INTAKE);
+  const [protocols, setProtocols] = useState<ProtocolNode[]>([]);
+  const [intake, setIntake] = useState<IntakeNode[]>([]);
   const [addingProt, setAddingProt] = useState(false);
   const [addingIntake, setAddingIntake] = useState(false);
   const [isReady, setIsReady] = useState(false);
+  const [hydration, setHydration] = useState(0);
+  // User-editable body stats
+  const [bodyWeight, setBodyWeight] = useState<number | null>(null);
+  const [bodyFat, setBodyFat] = useState<number | null>(null);
+  const [hrv, setHrv] = useState<number | null>(null);
+  const [sleepTotal, setSleepTotal] = useState("");    // "7h 14m" format
+  const [sleepDeep, setSleepDeep] = useState("");
+  const [sleepRem, setSleepRem] = useState("");
+  const [editingStats, setEditingStats] = useState(false);
+  // Goal targets
+  const [calGoal, setCalGoal] = useState(2800);
+  const [protGoal, setProtGoal] = useState(180);
+  const [waterGoal, setWaterGoal] = useState(4.0);
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
+  const [supabaseAvailable, setSupabaseAvailable] = useState(false);
+  const supabaseRef = useRef<ReturnType<typeof createSupabaseBrowserClient> | null>(null);
+
+  useEffect(() => {
+    try {
+      supabaseRef.current = createSupabaseBrowserClient();
+      setSupabaseAvailable(true);
+    } catch {
+      setSupabaseAvailable(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!supabaseAvailable || !supabaseRef.current) return;
+    supabaseRef.current.auth.getUser().then(({ data, error }: { data: any, error: any }) => {
+      if (error || !data?.user) {
+        setSupabaseUserId(null);
+        return;
+      }
+      setSupabaseUserId(data.user.id);
+    });
+  }, [supabaseAvailable]);
+
+  useEffect(() => {
+    if (searchParams.get("action") === "log-workout") {
+      setAddingProt(true);
+    }
+  }, [searchParams]);
 
   // Live Time
   const [time, setTime] = useState("");
@@ -132,21 +159,149 @@ export default function BiometricsPage() {
     return () => clearInterval(clockInt);
   }, []);
 
-  // Hydrate
   useEffect(() => {
-    const sProt = localStorage.getItem('yana_bio_prot');
-    const sInt = localStorage.getItem('yana_bio_int');
+    if (supabaseUserId && supabaseRef.current) {
+      const supabase = supabaseRef.current;
+      const today = new Date().toISOString().slice(0, 10);
+      Promise.all([
+        supabase
+          .from("biometric_protocols")
+          .select("*")
+          .eq("user_id", supabaseUserId)
+          .order("sort_order", { ascending: true }),
+        supabase
+          .from("biometric_intakes")
+          .select("*")
+          .eq("user_id", supabaseUserId)
+          .order("sort_order", { ascending: true }),
+        supabase
+          .from("biometrics")
+          .select("*")
+          .eq("user_id", supabaseUserId)
+          .eq("date", today)
+          .maybeSingle(),
+      ]).then(([protRes, intakeRes, bioRes]) => {
+        const protRows = (protRes.data ?? []) as BiometricProtocolRow[];
+        const intakeRows = (intakeRes.data ?? []) as BiometricIntakeRow[];
+        const biometrics = bioRes.data as BiometricRow | null;
+
+        if (protRows.length > 0) {
+          setProtocols(protRows.map((row) => ({
+            id: row.id,
+            name: row.name,
+            weight: row.weight,
+            reps: row.reps,
+            sets: row.sets,
+            completed: row.completed,
+          })));
+        }
+
+        if (intakeRows.length > 0) {
+          setIntake(intakeRows.map((row) => ({
+            id: row.id,
+            name: row.name,
+            calories: row.calories,
+            protein: row.protein,
+          })));
+        }
+
+        if (biometrics?.hydration_l !== null && biometrics?.hydration_l !== undefined) {
+          setHydration(biometrics.hydration_l);
+        }
+
+        setIsReady(true);
+      });
+      return;
+    }
+
+    const sProt = localStorage.getItem("yana_bio_prot");
+    const sInt = localStorage.getItem("yana_bio_int");
+    const sHyd = localStorage.getItem("yana_bio_hyd");
+    const sStats = localStorage.getItem("yana_bio_stats");
     if (sProt) setProtocols(JSON.parse(sProt));
     if (sInt) setIntake(JSON.parse(sInt));
+    if (sHyd) setHydration(Number(sHyd));
+    if (sStats) {
+      const s = JSON.parse(sStats);
+      if (s.bodyWeight != null) setBodyWeight(s.bodyWeight);
+      if (s.bodyFat != null) setBodyFat(s.bodyFat);
+      if (s.hrv != null) setHrv(s.hrv);
+      if (s.sleepTotal) setSleepTotal(s.sleepTotal);
+      if (s.sleepDeep) setSleepDeep(s.sleepDeep);
+      if (s.sleepRem) setSleepRem(s.sleepRem);
+      if (s.calGoal) setCalGoal(s.calGoal);
+      if (s.protGoal) setProtGoal(s.protGoal);
+      if (s.waterGoal) setWaterGoal(s.waterGoal);
+    }
     setIsReady(true);
-  }, []);
+  }, [supabaseUserId]);
 
-  // Sync
+  const macroGoals = { cal: calGoal, pro: protGoal };
+  const totals = useMemo(() => {
+    return intake.reduce((acc, curr) => ({
+      cal: acc.cal + curr.calories,
+      pro: acc.pro + curr.protein,
+    }), { cal: 0, pro: 0 });
+  }, [intake]);
+
   useEffect(() => {
     if (!isReady) return;
-    localStorage.setItem('yana_bio_prot', JSON.stringify(protocols));
-    localStorage.setItem('yana_bio_int', JSON.stringify(intake));
-  }, [protocols, intake, isReady]);
+    if (!supabaseUserId || !supabaseRef.current) {
+      localStorage.setItem("yana_bio_prot", JSON.stringify(protocols));
+      localStorage.setItem("yana_bio_int", JSON.stringify(intake));
+      localStorage.setItem("yana_bio_hyd", hydration.toString());
+      localStorage.setItem("yana_bio_stats", JSON.stringify({ bodyWeight, bodyFat, hrv, sleepTotal, sleepDeep, sleepRem, calGoal, protGoal, waterGoal }));
+      return;
+    }
+
+    const supabase = supabaseRef.current;
+
+    const sync = async () => {
+      if (protocols.length > 0) {
+        await supabase
+          .from("biometric_protocols")
+          .upsert(
+            protocols.map((protocol, index) => ({
+              id: protocol.id,
+              user_id: supabaseUserId,
+              name: protocol.name,
+              weight: protocol.weight,
+              reps: protocol.reps,
+              sets: protocol.sets,
+              completed: protocol.completed,
+              sort_order: index,
+            }))
+          );
+      }
+
+      if (intake.length > 0) {
+        await supabase
+          .from("biometric_intakes")
+          .upsert(
+            intake.map((item, index) => ({
+              id: item.id,
+              user_id: supabaseUserId,
+              name: item.name,
+              calories: item.calories,
+              protein: item.protein,
+              sort_order: index,
+            }))
+          );
+      }
+
+      const today = new Date().toISOString().slice(0, 10);
+      await supabase
+        .from("biometrics")
+        .upsert({
+          user_id: supabaseUserId,
+          date: today,
+          hydration_l: hydration,
+          nutrition_cal: totals.cal,
+        });
+    };
+
+    void sync();
+  }, [protocols, intake, hydration, totals.cal, isReady, supabaseUserId, bodyWeight, bodyFat, hrv, sleepTotal, sleepDeep, sleepRem, calGoal, protGoal, waterGoal]);
 
   // Live Simulation
   const [hr, setHr] = useState(62);
@@ -155,19 +310,22 @@ export default function BiometricsPage() {
     return () => clearInterval(hrInt);
   }, []);
 
-  const macroGoals = { cal: 2800, pro: 180 };
-  const totals = useMemo(() => {
-    return intake.reduce((acc, curr) => ({
-      cal: acc.cal + curr.calories,
-      pro: acc.pro + curr.protein,
-    }), { cal: 0, pro: 0 });
-  }, [intake]);
-
   const tonnage = protocols.filter(p => p.completed).reduce((a, b) => a + (b.weight * b.reps * b.sets), 0);
   const completedProts = protocols.filter(p => p.completed).length;
 
-  const [hydration, setHydration] = useState(2.2); // Liters
-  const waterGoal = 4.0;
+
+  if (!isReady) {
+    return (
+      <div className="flex h-full flex-col gap-4 min-h-0 antialiased font-sans select-none overflow-hidden bg-background text-foreground">
+        <div className="h-8 w-40 bg-muted/30 animate-pulse" />
+        <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr_340px] gap-4 flex-1 min-h-0">
+          <div className="h-full bg-muted/20 animate-pulse border border-border/20" />
+          <div className="h-full bg-muted/20 animate-pulse border border-border/20" />
+          <div className="h-full bg-muted/20 animate-pulse border border-border/20" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col gap-4 min-h-0 antialiased font-sans select-none overflow-hidden bg-background text-foreground">
@@ -204,18 +362,28 @@ export default function BiometricsPage() {
 
              <div className="flex-1 flex flex-col min-h-0 overflow-y-auto scrollbar-hide py-2">
                 
-                {/* Physical Adaptation Sub-module */}
-                <div className="px-4 py-3 border-b border-border/10 mb-2 flex justify-between items-center bg-muted/5">
-                   <div className="flex flex-col">
-                      <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60 mb-1 flex items-center gap-1.5"><Target className="h-2.5 w-2.5" /> Physiology</span>
-                      <span className="text-xl font-extralight tracking-tight tabular-nums">78.4 <span className="text-[10px] text-muted-foreground/60 ml-0.5">KG</span></span>
-                   </div>
-                   <div className="flex flex-col items-end">
-                      <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60 mb-1">Body Fat</span>
-                      <span className="text-xl font-extralight tracking-tight tabular-nums text-indigo-400">12.1 <span className="text-[10px] text-muted-foreground/60 ml-0.5">%</span></span>
-                   </div>
-                </div>
+                                 {/* Physical Adaptation Sub-module */}
+                 <div className="px-4 py-3 border-b border-border/10 mb-2 bg-muted/5">
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="flex flex-col">
+                         <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60 mb-1 flex items-center gap-1.5"><Target className="h-2.5 w-2.5" /> Body Weight</span>
+                         {bodyWeight != null
+                           ? <span className="text-xl font-extralight tracking-tight tabular-nums">{bodyWeight} <span className="text-[10px] text-muted-foreground/60 ml-0.5">KG</span></span>
+                           : <span className="text-[10px] font-mono text-muted-foreground/40 uppercase tracking-widest">—</span>
+                         }
+                      </div>
+                      <div className="flex flex-col items-end">
+                         <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60 mb-1">Body Fat</span>
+                         {bodyFat != null
+                           ? <span className="text-xl font-extralight tracking-tight tabular-nums text-indigo-400">{bodyFat} <span className="text-[10px] text-muted-foreground/60 ml-0.5">%</span></span>
+                           : <span className="text-[10px] font-mono text-muted-foreground/40 uppercase tracking-widest">—</span>
+                         }
+                      </div>
+                    </div>
+                    <button onClick={() => setEditingStats(true)} className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground/50 hover:text-foreground transition-colors border border-border/20 px-2 py-0.5">Update Stats</button>
+                 </div>
 
+                 
                 <div className="px-4 py-3 border-b border-border/10 mb-2">
                   <span className="text-[9px] font-mono font-black uppercase tracking-[0.2em] text-muted-foreground/60">Session Tonnage</span>
                   <div className="text-4xl font-extralight tracking-tighter tabular-nums leading-none mt-1 mb-2">
@@ -273,8 +441,11 @@ export default function BiometricsPage() {
                <div className="grid grid-cols-2 gap-4 px-4 py-4 border-b border-border/10 shrink-0">
                   <div className="flex flex-col gap-1 border-r border-border/10">
                      <h4 className="text-[9px] font-mono uppercase text-muted-foreground/60 tracking-widest">HRV Baseline</h4>
-                     <span className="text-3xl font-extralight tabular-nums tracking-tight">72<span className="text-[12px] text-muted-foreground ml-1">ms</span></span>
-                     <span className="text-[9px] font-mono uppercase tracking-widest text-emerald-500 mt-1 flex items-center gap-1"><ArrowUpRight className="h-2 w-2" /> 12% Up</span>
+                     {hrv != null
+                       ? <span className="text-3xl font-extralight tabular-nums tracking-tight">{hrv}<span className="text-[12px] text-muted-foreground ml-1">ms</span></span>
+                       : <span className="text-xl font-extralight text-muted-foreground/30">— ms</span>
+                     }
+                     <button onClick={() => setEditingStats(true)} className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground/40 hover:text-foreground transition-colors text-left">Enter value</button>
                   </div>
                   <div className="flex flex-col gap-1 pl-2">
                      <h4 className="text-[9px] font-mono uppercase text-muted-foreground/60 tracking-widest">Live BPM</h4>
@@ -293,55 +464,57 @@ export default function BiometricsPage() {
 
                {/* Chart */}
                <div className="shrink-0 h-[180px] w-full p-2 relative bg-background/20 border-b border-border/10">
-               <ResponsiveContainer width="100%" height="100%">
-                 <AreaChart data={RECOVERY_DATA} margin={{ top: 10, right: 12, left: 10, bottom: 4 }}>
-                   <defs>
-                     <linearGradient id="bioRec" x1="0" y1="0" x2="0" y2="1">
-                       <stop offset="0%" stopColor="#6366f1" stopOpacity={0.15}/>
-                       <stop offset="100%" stopColor="#6366f1" stopOpacity={0}/>
-                     </linearGradient>
-                     <linearGradient id="bioStr" x1="0" y1="0" x2="0" y2="1">
-                       <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.15}/>
-                       <stop offset="100%" stopColor="#f59e0b" stopOpacity={0}/>
-                     </linearGradient>
-                   </defs>
-                   <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: "var(--color-muted-foreground)", fontWeight: 500 }} dy={5} />
-                   <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="2 2" opacity={0.3} />
-                   <RechartsTooltip
-                     cursor={{ stroke: 'var(--color-muted-foreground)', strokeWidth: 1, strokeDasharray: '4 4' }}
-                     contentStyle={{ borderRadius: "0", border: "1px solid var(--color-border)", backgroundColor: "var(--color-background)", boxShadow: "none", fontSize: "11px", fontFamily: "monospace", padding: "6px 10px" }}
-                   />
-                   <Area type="monotone" dataKey="recovery" stroke="#6366f1" strokeWidth={2} fillOpacity={1} fill="url(#bioRec)" activeDot={{ r: 4, strokeWidth: 0, fill: "#6366f1" }} />
-                   <Area type="monotone" dataKey="strain" stroke="#f59e0b" strokeWidth={2} fillOpacity={1} fill="url(#bioStr)" activeDot={{ r: 4, strokeWidth: 0, fill: "#f59e0b" }} />
-                 </AreaChart>
-               </ResponsiveContainer>
+               {RECOVERY_DATA.length > 0 ? (
+                 <ResponsiveContainer width="100%" height="100%">
+                   <AreaChart data={RECOVERY_DATA} margin={{ top: 10, right: 12, left: 10, bottom: 4 }}>
+                     <defs>
+                       <linearGradient id="bioRec" x1="0" y1="0" x2="0" y2="1">
+                         <stop offset="0%" stopColor="#6366f1" stopOpacity={0.15}/>
+                         <stop offset="100%" stopColor="#6366f1" stopOpacity={0}/>
+                       </linearGradient>
+                       <linearGradient id="bioStr" x1="0" y1="0" x2="0" y2="1">
+                         <stop offset="0%" stopColor="#f59e0b" stopOpacity={0.15}/>
+                         <stop offset="100%" stopColor="#f59e0b" stopOpacity={0}/>
+                       </linearGradient>
+                     </defs>
+                     <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: "var(--color-muted-foreground)", fontWeight: 500 }} dy={5} />
+                     <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="2 2" opacity={0.3} />
+                     <RechartsTooltip
+                       cursor={{ stroke: 'var(--color-muted-foreground)', strokeWidth: 1, strokeDasharray: '4 4' }}
+                       contentStyle={{ borderRadius: "0", border: "1px solid var(--color-border)", backgroundColor: "var(--color-background)", boxShadow: "none", fontSize: "11px", fontFamily: "monospace", padding: "6px 10px" }}
+                     />
+                     <Area type="monotone" dataKey="recovery" stroke="#6366f1" strokeWidth={2} fillOpacity={1} fill="url(#bioRec)" activeDot={{ r: 4, strokeWidth: 0, fill: "#6366f1" }} />
+                     <Area type="monotone" dataKey="strain" stroke="#f59e0b" strokeWidth={2} fillOpacity={1} fill="url(#bioStr)" activeDot={{ r: 4, strokeWidth: 0, fill: "#f59e0b" }} />
+                   </AreaChart>
+                 </ResponsiveContainer>
+               ) : (
+                 <div className="flex h-full items-center justify-center text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
+                   No telemetry yet
+                 </div>
+               )}
              </div>
 
              {/* Circadian & Neural Phase */}
              <div className="flex flex-col flex-1 p-4 pb-6 bg-muted/5">
-                <div className="flex items-center gap-2 mb-4">
-                   <BrainCircuit className="h-3.5 w-3.5 text-indigo-400" />
-                   <h4 className="text-[10px] font-mono uppercase font-black tracking-widest text-foreground">Circadian Engine</h4>
+                <div className="flex items-center justify-between gap-2 mb-4">
+                   <div className="flex items-center gap-2">
+                     <BrainCircuit className="h-3.5 w-3.5 text-indigo-400" />
+                     <h4 className="text-[10px] font-mono uppercase font-black tracking-widest text-foreground">Circadian Engine</h4>
+                   </div>
+                   <button onClick={() => setEditingStats(true)} className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground/40 hover:text-foreground transition-colors border border-border/20 px-2 py-0.5">Log Sleep</button>
                 </div>
-                
                 <div className="grid grid-cols-3 gap-6">
                    <div className="flex flex-col gap-2">
                       <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60">Total Sleep</span>
-                      <span className="text-2xl font-extralight tabular-nums text-foreground">7h 14m</span>
+                      {sleepTotal ? <span className="text-2xl font-extralight tabular-nums text-foreground">{sleepTotal}</span> : <span className="text-xl text-muted-foreground/30 font-extralight">—</span>}
                    </div>
                    <div className="flex flex-col gap-2">
                       <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60">Deep Phase</span>
-                      <span className="text-2xl font-extralight tabular-nums text-emerald-500">1h 45m</span>
-                      <div className="w-full bg-muted/30 h-1 mt-1">
-                         <div className="bg-emerald-500 h-full w-[65%]" />
-                      </div>
+                      {sleepDeep ? <span className="text-2xl font-extralight tabular-nums text-emerald-500">{sleepDeep}</span> : <span className="text-xl text-muted-foreground/30 font-extralight">—</span>}
                    </div>
                    <div className="flex flex-col gap-2">
                       <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60">REM Phase</span>
-                      <span className="text-2xl font-extralight tabular-nums text-indigo-400">2h 10m</span>
-                      <div className="w-full bg-muted/30 h-1 mt-1">
-                         <div className="bg-indigo-400 h-full w-[80%]" />
-                      </div>
+                      {sleepRem ? <span className="text-2xl font-extralight tabular-nums text-indigo-400">{sleepRem}</span> : <span className="text-xl text-muted-foreground/30 font-extralight">—</span>}
                    </div>
                 </div>
              </div>
@@ -480,6 +653,50 @@ export default function BiometricsPage() {
         </div>
 
       </div>
+
+      {/* ─── STATS EDIT MODAL ─── */}
+      {editingStats && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-background/80 backdrop-blur-sm" onClick={() => setEditingStats(false)} />
+          <div className="relative bg-background border border-border/30 p-6 w-full max-w-sm flex flex-col gap-4">
+            <h3 className="text-[11px] font-mono font-bold uppercase tracking-widest">Log Body Stats</h3>
+            {[
+              { label: "Body Weight (KG)", val: bodyWeight?.toString() ?? "", set: (v: string) => setBodyWeight(v ? parseFloat(v) : null) },
+              { label: "Body Fat (%)", val: bodyFat?.toString() ?? "", set: (v: string) => setBodyFat(v ? parseFloat(v) : null) },
+              { label: "HRV Baseline (ms)", val: hrv?.toString() ?? "", set: (v: string) => setHrv(v ? parseFloat(v) : null) },
+              { label: "Total Sleep (e.g. 7h 30m)", val: sleepTotal, set: setSleepTotal },
+              { label: "Deep Phase (e.g. 1h 45m)", val: sleepDeep, set: setSleepDeep },
+              { label: "REM Phase (e.g. 2h 10m)", val: sleepRem, set: setSleepRem },
+              { label: "Calorie Goal (kcal)", val: calGoal.toString(), set: (v: string) => setCalGoal(v ? parseInt(v) : 2800) },
+              { label: "Protein Goal (g)", val: protGoal.toString(), set: (v: string) => setProtGoal(v ? parseInt(v) : 180) },
+              { label: "Water Goal (L)", val: waterGoal.toString(), set: (v: string) => setWaterGoal(v ? parseFloat(v) : 4.0) },
+            ].map(({ label, val, set }) => (
+              <div key={label} className="flex flex-col gap-1">
+                <label className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">{label}</label>
+                <input
+                  defaultValue={val}
+                  onChange={e => set(e.target.value)}
+                  className="bg-background border border-border/20 px-3 py-2 text-[11px] font-mono outline-none focus:border-foreground transition-colors"
+                />
+              </div>
+            ))}
+            <button
+              onClick={() => setEditingStats(false)}
+              className="mt-2 bg-foreground text-background text-[9px] font-mono uppercase tracking-widest py-2 hover:bg-foreground/90 transition-colors"
+            >
+              Save Stats
+            </button>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+export default function BiometricsPage() {
+  return (
+    <Suspense fallback={<div className="p-4 text-xs font-mono text-muted-foreground">Initializing Telemetry...</div>}>
+      <BiometricsPageContent />
+    </Suspense>
   );
 }

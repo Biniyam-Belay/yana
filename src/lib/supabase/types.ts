@@ -29,6 +29,7 @@ export interface KeyResultRow {
   title: string;
   progress: number;
   status: "on-track" | "at-risk" | "behind";
+  color: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -36,11 +37,27 @@ export interface KeyResultRow {
 export interface ObjectiveRow {
   id: string;
   user_id: string;
-  key_result_id: string;
+  north_star_id: string;
+  key_result_id: string | null;
   tier: "Decade" | "Year" | "Quarter" | "Month";
   title: string;
   progress: number;
   status: "on-track" | "at-risk" | "behind";
+  color: string | null;
+  due_date: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ObjectiveKeyResultRow {
+  id: string;
+  user_id: string;
+  objective_id: string;
+  title: string;
+  progress: number;
+  status: "on-track" | "at-risk" | "behind";
+  color: string | null;
+  due_date: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -53,6 +70,23 @@ export interface TaskRow {
   description: string | null;
   status: "todo" | "in_progress" | "done" | "cancelled";
   actual_min: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProfessionalTaskRow {
+  id: string;
+  user_id: string;
+  objective_id: string | null;
+  project_id: string | null;
+  title: string;
+  description: string | null;
+  status: "backlog" | "todo" | "in-progress" | "review" | "done";
+  priority: "critical" | "high" | "medium" | "low";
+  assignee: string | null;
+  due_date: string | null;
+  tags: string[];
+  sort_order: number;
   created_at: string;
   updated_at: string;
 }
@@ -161,6 +195,17 @@ export interface BiometricIntakeRow {
   updated_at: string;
 }
 
+export interface BiometricRow {
+  id: string;
+  user_id: string;
+  date: string;
+  sleep_score: number | null;
+  hydration_l: number | null;
+  nutrition_cal: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TacticalMatrixItemRow {
   id: string;
   user_id: string;
@@ -192,6 +237,8 @@ export interface TacticalBlockRow {
   end_hr: number;
   title: string;
   type: TacticalBlockType;
+  task_id: string | null;
+  objective_id: string | null;
   sort_order: number;
   created_at: string;
   updated_at: string;

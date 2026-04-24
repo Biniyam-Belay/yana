@@ -38,6 +38,7 @@ create table key_results (
   title         text not null,
   progress      numeric(5,2) not null default 0,
   status        kr_status not null default 'on-track',
+  color         text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
@@ -50,15 +51,19 @@ create type objective_tier as enum ('Decade', 'Year', 'Quarter', 'Month');
 create table objectives (
   id            uuid primary key default uuid_generate_v4(),
   user_id       uuid not null references users(id) on delete cascade,
-  key_result_id uuid not null references key_results(id) on delete cascade,
+  north_star_id uuid not null references north_stars(id) on delete cascade,
+  key_result_id uuid references key_results(id) on delete set null,
   tier          objective_tier not null default 'Quarter',
   title         text not null,
   progress      numeric(5,2) not null default 0,
   status        kr_status not null default 'on-track',
+  color         text,
+  due_date      date,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
 create index idx_obj_user on objectives(user_id);
+create index idx_obj_ns on objectives(north_star_id);
 create index idx_obj_kr on objectives(key_result_id);
 
 -- ─── 5. Tasks (Micro / Production Engine) ───────────────────
@@ -82,6 +87,22 @@ create table tasks (
 );
 create index idx_task_user on tasks(user_id);
 create index idx_task_obj on tasks(objective_id);
+
+-- ─── 5b. Objective Key Results (Mid-range telemetry) ───────
+create table objective_key_results (
+  id            uuid primary key default uuid_generate_v4(),
+  user_id       uuid not null references users(id) on delete cascade,
+  objective_id  uuid not null references objectives(id) on delete cascade,
+  title         text not null,
+  progress      numeric(5,2) not null default 0,
+  status        kr_status not null default 'on-track',
+  color         text,
+  due_date      date,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index idx_objkr_user on objective_key_results(user_id);
+create index idx_objkr_obj on objective_key_results(objective_id);
 
 -- ─── 6. Time Blocks (Micro / Tactical Gearbox) ──────────────
 create table time_blocks (
@@ -275,6 +296,8 @@ create table tactical_blocks (
   end_hr        numeric(4,2) not null,
   title         text not null,
   type          tactical_block_type not null,
+  task_id       uuid,
+  objective_id  uuid,
   sort_order    integer not null default 0,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
@@ -291,6 +314,34 @@ create table tactical_inbox_items (
   updated_at    timestamptz not null default now()
 );
 create index idx_tactical_inbox_user on tactical_inbox_items(user_id);
+
+-- ─── 11. Professional Workspace Persistence ────────────────
+create type professional_task_status as enum ('backlog', 'todo', 'in-progress', 'review', 'done');
+create type professional_task_priority as enum ('critical', 'high', 'medium', 'low');
+
+create table professional_tasks (
+  id                   uuid primary key default uuid_generate_v4(),
+  user_id              uuid not null references users(id) on delete cascade,
+  objective_id         uuid references objectives(id) on delete set null,
+  project_id           uuid references objective_key_results(id) on delete set null,
+  title                text not null,
+  description          text,
+  status               professional_task_status not null default 'todo',
+  priority             professional_task_priority not null default 'medium',
+  assignee             text,
+  due_date             date,
+  tags                 text[] not null default '{}',
+  sort_order           integer not null default 0,
+  created_at           timestamptz not null default now(),
+  updated_at           timestamptz not null default now(),
+  constraint professional_tasks_project_objective_fk check (
+    project_id is null or objective_id is not null
+  )
+);
+create index idx_prof_tasks_user on professional_tasks(user_id);
+create index idx_prof_tasks_objective on professional_tasks(objective_id);
+create index idx_prof_tasks_project on professional_tasks(project_id);
+create index idx_prof_tasks_status on professional_tasks(status);
 
 -- ─── Triggers for timestamps ────────────────────────────────
 create or replace function update_updated_at()
@@ -318,6 +369,7 @@ create trigger trg_tactical_matrix_upd before update on tactical_matrix_items fo
 create trigger trg_tactical_commands_upd before update on tactical_commands for each row execute function update_updated_at();
 create trigger trg_tactical_blocks_upd before update on tactical_blocks for each row execute function update_updated_at();
 create trigger trg_tactical_inbox_upd before update on tactical_inbox_items for each row execute function update_updated_at();
+create trigger trg_professional_tasks_upd before update on professional_tasks for each row execute function update_updated_at();
 
 -- ─── Auth sync and row-level security ───────────────────────
 create or replace function sync_auth_user_profile()
@@ -362,6 +414,7 @@ alter table tactical_matrix_items enable row level security;
 alter table tactical_commands enable row level security;
 alter table tactical_blocks enable row level security;
 alter table tactical_inbox_items enable row level security;
+alter table professional_tasks enable row level security;
 
 create policy "Users can read their profile" on users
   for select using (id = auth.uid());
@@ -405,4 +458,6 @@ create policy "Users can manage their tactical commands" on tactical_commands
 create policy "Users can manage their tactical blocks" on tactical_blocks
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "Users can manage their tactical inbox" on tactical_inbox_items
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "Users can manage their professional tasks" on professional_tasks
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
