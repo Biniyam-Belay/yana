@@ -14,6 +14,7 @@ import {
 } from "recharts";
 import { cn } from "@/lib/utils";
 import { useNorthStar } from "@/store/north-star";
+import { useTimer } from "@/store/timer";
 import { useAppStore } from "@/store";
 import { useLocalState } from "@/hooks/use-local-state";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -119,19 +120,22 @@ export default function HUDPage() {
   const [activeRange, setActiveRange] = useLocalState<WorkRange>("yana_pref_range", "1M");
   const [showBalances, setShowBalances] = useLocalState<boolean>("yana_pref_balances", true);
   const [expandedObjectiveIds, setExpandedObjectiveIds] = useState<string[]>([]);
+  // ─── Global timer state (survives page navigation) ───
+  const {
+    timerRunning, setTimerRunning,
+    timerSeconds, setTimerSeconds,
+    timerMode, setTimerMode,
+    timerPresetMinutes, setTimerPresetMinutes,
+    timerStartedAt, setTimerStartedAt,
+    selectedTimerTarget, setSelectedTimerTarget,
+    customTimerTarget, setCustomTimerTarget,
+    timerTargetError, setTimerTargetError,
+    timerSessions, setTimerSessions,
+    supabaseUserId: timerSupabaseUserId, setSupabaseUserId: setTimerSupabaseUserId,
+  } = useTimer();
+
   const [timerReady, setTimerReady] = useState(false);
   const [introAnimations, setIntroAnimations] = useState(false);
-
-  // Focus Timer State
-  const [timerMode, setTimerMode] = useState<TimerMode>("countdown");
-  const [timerPresetMinutes, setTimerPresetMinutes] = useState(25);
-  const [selectedTimerTarget, setSelectedTimerTarget] = useState("");
-  const [customTimerTarget, setCustomTimerTarget] = useState("");
-  const [timerTargetError, setTimerTargetError] = useState<string | null>(null);
-  const [timerSessions, setTimerSessions] = useState<TimerSessionRecord[]>([]);
-  const [timerStartedAt, setTimerStartedAt] = useState<string | null>(null);
-  const [timerRunning, setTimerRunning] = useState(false);
-  const [timerSeconds, setTimerSeconds] = useState(0);
   const [executionTasks, setExecutionTasks] = useState<ProfessionalExecutionTask[]>([]);
   const [supabaseAvailable, setSupabaseAvailable] = useState(false);
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
@@ -141,52 +145,36 @@ export default function HUDPage() {
   const timerPresets = [15, 25, 50, 90] as const;
 
   const timerTargetOptions = useMemo(() => {
-    const projectTargets = objectives.map((obj) => ({
-      id: `project:${obj.id}`,
-      label: `Project · ${obj.title}`,
-    }));
+    // Only execution tasks (not-done) as Task · entries
+    const taskTargets = executionTasks
+      .filter((task) => task.status !== "done")
+      .map((task) => ({
+        id: `task:${task.id}`,
+        label: `Task \u00b7 ${task.title}`,
+      }));
 
-    const taskTargets = [
-      ...executionTasks
-        .filter((task) => task.status !== "done")
-        .map((task) => ({
-          id: `task:${task.id}`,
-          label: `Task · ${task.title}`,
-        })),
-      ...objectives.flatMap((objective) =>
-        objective.keyResults
-          .filter((keyResult) => keyResult.progress < 100)
-          .map((keyResult) => ({
-            id: `task:${keyResult.id}`,
-            label: `Task · ${keyResult.title}`,
-          })),
-      ),
-    ];
-
+    // Objectives as Objective · entries
     const objectiveTargets = objectives.map((obj) => ({
       id: `objective:${obj.id}`,
-      label: `Objective · ${obj.title}`,
+      label: `Objective \u00b7 ${obj.title}`,
     }));
 
-    const krTargets = [...northStarKRs, ...objectives.flatMap((obj) => obj.keyResults)].map((kr) => ({
-      id: `kr:${kr.id}`,
-      label: `KR · ${kr.title}`,
-    }));
-
-    const uniqueById = <T extends { id: string }>(items: T[]) => {
-      const seen = new Set<string>();
-      return items.filter((item) => {
-        if (seen.has(item.id)) return false;
-        seen.add(item.id);
-        return true;
-      });
-    };
+    // North Star KRs + objective milestones (not completed) as KR · entries
+    const krTargets = [
+      ...northStarKRs,
+      ...objectives.flatMap((obj) => obj.keyResults),
+    ]
+      .filter((kr, idx, arr) => arr.findIndex((k) => k.id === kr.id) === idx) // deduplicate
+      .filter((kr) => kr.progress < 100)
+      .map((kr) => ({
+        id: `kr:${kr.id}`,
+        label: `KR \u00b7 ${kr.title}`,
+      }));
 
     return [
-      ...uniqueById(projectTargets),
-      ...uniqueById(taskTargets),
-      ...uniqueById(objectiveTargets),
-      ...uniqueById(krTargets),
+      ...objectiveTargets,
+      ...taskTargets,
+      ...krTargets,
       { id: "custom", label: "Custom Target" },
     ];
   }, [objectives, northStarKRs, executionTasks]);
@@ -510,30 +498,10 @@ export default function HUDPage() {
     resetTimer();
   };
 
+  // Sync supabase user ID to timer context
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (timerRunning) {
-      interval = setInterval(() => {
-        setTimerSeconds((s) => {
-          const next = s + 1;
-          if (timerMode === "countdown" && plannedTimerSeconds) {
-            return Math.min(next, plannedTimerSeconds);
-          }
-          return next;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [timerRunning, timerMode, plannedTimerSeconds]);
-
-  useEffect(() => {
-    if (timerMode !== "countdown" || !timerRunning || !plannedTimerSeconds) return;
-    if (timerSeconds < plannedTimerSeconds) return;
-
-    setTimerRunning(false);
-    recordTimerSession(true, plannedTimerSeconds);
-    setTimerStartedAt(null);
-  }, [timerMode, timerRunning, timerSeconds, plannedTimerSeconds]);
+    setTimerSupabaseUserId(supabaseUserId);
+  }, [supabaseUserId, setTimerSupabaseUserId]);
 
   const timerDisplay = useMemo(() => {
     const h = Math.floor(timerDisplaySeconds / 3600);
@@ -701,6 +669,7 @@ export default function HUDPage() {
     localStorage.setItem(timerStorageKey, JSON.stringify(timerSessions));
   }, [timerSessions, supabaseUserId]);
 
+
   useEffect(() => {
     const tick = () => {
       const now = new Date();
@@ -711,6 +680,7 @@ export default function HUDPage() {
     const i = setInterval(tick, 1000);
     return () => clearInterval(i);
   }, []);
+
 
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setExpandedSection(null); };

@@ -39,6 +39,7 @@ create table key_results (
   progress      numeric(5,2) not null default 0,
   status        kr_status not null default 'on-track',
   color         text,
+  due_date      date,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );

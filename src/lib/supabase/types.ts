@@ -30,6 +30,7 @@ export interface KeyResultRow {
   progress: number;
   status: "on-track" | "at-risk" | "behind";
   color: string | null;
+  due_date: string | null;
   created_at: string;
   updated_at: string;
 }

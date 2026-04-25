@@ -1,28 +1,23 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { createPortal } from "react-dom";
 import {
   Target, Crosshair, Flag, ArrowUpRight, Plus,
-  Flame, TrendingUp, Trash2,
-  Milestone, Star, Eye, X, Check, ChevronDown
+  Flame, TrendingUp, Trash2, Search,
+  Milestone, Star, Eye, X, Check, ChevronDown,
+  CalendarDays, Palette, ChevronLeft, ChevronRight
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, ResponsiveContainer, CartesianGrid,
-  Tooltip as RechartsTooltip
+  Tooltip as RechartsTooltip, ReferenceLine
 } from "recharts";
 import { cn } from "@/lib/utils";
 import { useNorthStar } from "@/store/north-star";
 import type { Status, Tier } from "@/store/north-star";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import type { NorthStarMilestoneRow } from "@/lib/supabase/types";
 
 
-interface MilestoneItem {
-  id: string;
-  title: string;
-  dueDate: string | null;
-  done: boolean;
-}
+
 
 const statusColor: Record<Status, string> = { "on-track": "bg-emerald-500", "at-risk": "bg-amber-500", "behind": "bg-rose-500" };
 const statusPillColor: Record<Status, string> = {
@@ -40,6 +35,17 @@ const tierRank: Record<Tier, number> = { Decade: 0, Year: 1, Quarter: 2, Month: 
 const uid = () => (typeof crypto !== "undefined" && "randomUUID" in crypto
   ? crypto.randomUUID()
   : Math.random().toString(36).slice(2, 11));
+
+// ─── FORMAT ───
+const fmt = (d: Date) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const fmtFull = (iso: string) => {
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+};
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 
 // ─── COMPONENTS ───
 
@@ -79,11 +85,343 @@ function InlineInput({ placeholder, onSubmit, onCancel, autoFocus = true, initia
   );
 }
 
-function AddButton({ onClick, label }: { onClick: () => void; label: string }) {
+// ─── PORTAL HOOK: flicker-free, viewport-aware floating panel ───────────────
+import { useLayoutEffect } from "react";
+
+function useFloatingPortal(
+  triggerRef: React.RefObject<HTMLElement | null>,
+  open: boolean,
+  panelW = 268,
+  panelH = 320,
+) {
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => { setMounted(true); }, []);
+
+  // useLayoutEffect fires synchronously before the browser paints — no flash at (0,0)
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current) {
+      setCoords(null);
+      return;
+    }
+
+    const compute = () => {
+      if (!triggerRef.current) return;
+      const r = triggerRef.current.getBoundingClientRect();
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const GAP = 6;
+
+      // Horizontal: prefer align-left, flip left if overflowing right
+      let left = r.left;
+      if (left + panelW + 8 > vw) left = Math.max(8, vw - panelW - 8);
+
+      // Vertical: prefer below, flip above if not enough room below
+      let top: number;
+      if (r.bottom + GAP + panelH > vh && r.top - GAP - panelH > 0) {
+        // Open upward
+        top = r.top - GAP - panelH;
+      } else {
+        // Open downward
+        top = r.bottom + GAP;
+      }
+
+      setCoords({ top, left });
+    };
+
+    compute();
+    window.addEventListener("scroll", compute, true);
+    window.addEventListener("resize", compute);
+    return () => {
+      window.removeEventListener("scroll", compute, true);
+      window.removeEventListener("resize", compute);
+    };
+  }, [open, triggerRef, panelW, panelH]);
+
+  return { coords, mounted };
+}
+
+// ─── AMAZING COLOR PICKER ───
+const PALETTE_ROWS = [
+  { label: "Slate",  colors: ["#f8fafc","#94a3b8","#64748b","#334155","#0f172a"] },
+  { label: "Vivid",  colors: ["#f43f5e","#ec4899","#a855f7","#6366f1","#3b82f6"] },
+  { label: "Neon",   colors: ["#fb923c","#facc15","#4ade80","#34d399","#22d3ee"] },
+  { label: "Muted",  colors: ["#fda4af","#c4b5fd","#93c5fd","#6ee7b7","#fcd34d"] },
+];
+
+function ColorPicker({ value, onChange, label = "Color" }: { value: string; onChange: (c: string) => void; label?: string }) {
+  const [open, setOpen] = useState(false);
+  const [hex, setHex] = useState(value);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const { coords, mounted } = useFloatingPortal(triggerRef as React.RefObject<HTMLElement>, open, 268, 285);
+
+  // sync hex input when value changes externally
+  useEffect(() => { setHex(value); }, [value]);
+
+  // close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!panelRef.current?.contains(t) && !triggerRef.current?.contains(t)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const commitHex = (raw: string) => {
+    const clean = raw.startsWith("#") ? raw : "#" + raw;
+    if (/^#[0-9a-fA-F]{6}$/.test(clean)) { onChange(clean); setHex(clean); }
+  };
+
+  const panel = open && coords !== null && mounted ? createPortal(
+    <div
+      ref={panelRef}
+      style={{ position: "fixed", top: coords!.top, left: coords!.left, zIndex: 9999, width: 268 }}
+      className="bg-background/95 backdrop-blur-2xl border border-border/50 rounded-2xl shadow-2xl overflow-hidden"
+      onMouseDown={e => e.stopPropagation()}
+    >
+      {/* Live preview strip */}
+      <div className="h-10 w-full relative" style={{ backgroundColor: value }}>
+        <div className="absolute inset-0 bg-gradient-to-r from-black/20 via-transparent to-white/20" />
+        <div className="absolute bottom-2 left-3 flex items-center gap-2">
+          <span className="text-[9px] font-mono font-bold tracking-widest uppercase" style={{ color: parseInt(value.slice(1,3),16)*0.299 + parseInt(value.slice(3,5),16)*0.587 + parseInt(value.slice(5,7),16)*0.114 > 150 ? '#000' : '#fff', textShadow: '0 1px 2px rgba(0,0,0,0.4)' }}>
+            {label}
+          </span>
+        </div>
+        <button onClick={() => setOpen(false)} className="absolute top-2 right-2 p-0.5 rounded-full bg-black/20 hover:bg-black/40 text-white/70 hover:text-white transition-all">
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+
+      <div className="p-3 flex flex-col gap-3">
+        {/* Palette rows */}
+        {PALETTE_ROWS.map(row => (
+          <div key={row.label} className="flex flex-col gap-1">
+            <span className="text-[7px] font-mono uppercase tracking-[0.18em] text-muted-foreground/50">{row.label}</span>
+            <div className="flex gap-1.5">
+              {row.colors.map(c => (
+                <button
+                  key={c}
+                  onClick={() => { onChange(c); setHex(c); setOpen(false); }}
+                  title={c}
+                  className="relative flex-1 h-7 rounded-lg border-2 transition-all duration-150 hover:scale-105 active:scale-95 focus:outline-none"
+                  style={{
+                    backgroundColor: c,
+                    borderColor: value === c ? 'rgba(255,255,255,0.9)' : 'transparent',
+                    boxShadow: value === c ? `0 0 0 2px ${c}, 0 0 0 4px rgba(255,255,255,0.3)` : 'inset 0 1px 0 rgba(255,255,255,0.2)',
+                  }}
+                >
+                  {value === c && (
+                    <span className="absolute inset-0 flex items-center justify-center">
+                      <Check className="h-3 w-3" style={{ color: parseInt(c.slice(1,3),16)*0.299 + parseInt(c.slice(3,5),16)*0.587 + parseInt(c.slice(5,7),16)*0.114 > 150 ? '#000' : '#fff' }} />
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+
+        {/* Divider */}
+        <div className="h-px bg-border/30" />
+
+        {/* Hex input + native picker */}
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <input
+              type="color"
+              value={value}
+              onChange={e => { onChange(e.target.value); setHex(e.target.value); }}
+              className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+              title="Pick any color"
+            />
+            <div
+              className="h-8 w-8 rounded-lg border border-border/40 shadow-inner cursor-pointer shrink-0 flex items-center justify-center relative overflow-hidden"
+              style={{ backgroundColor: value }}
+            >
+              <div className="absolute inset-0" style={{ background: 'conic-gradient(from 0deg, #f43f5e, #f97316, #facc15, #4ade80, #22d3ee, #6366f1, #a855f7, #f43f5e)', opacity: 0.7 }} />
+              <Palette className="h-3.5 w-3.5 text-white drop-shadow relative z-10" />
+            </div>
+          </div>
+          <div className="flex flex-1 items-center bg-muted/40 border border-border/30 rounded-lg px-2 gap-2">
+            <span className="text-[10px] font-mono text-muted-foreground select-none">#</span>
+            <input
+              type="text"
+              value={hex.replace('#', '')}
+              onChange={e => setHex('#' + e.target.value)}
+              onBlur={e => commitHex('#' + e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') commitHex('#' + (e.target as HTMLInputElement).value); }}
+              maxLength={6}
+              spellCheck={false}
+              className="flex-1 bg-transparent text-[11px] font-mono text-foreground outline-none uppercase tracking-widest py-1.5"
+              placeholder="64748b"
+            />
+            <div className="h-4 w-4 rounded-[4px] shrink-0 border border-border/40" style={{ backgroundColor: value }} />
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  ) : null;
+
   return (
-    <button onClick={onClick} className="shrink-0 flex items-center gap-1.5 px-4 py-2 text-[9px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground hover:bg-muted/15 transition-colors border-t border-border/10 w-full">
-      <Plus className="h-2.5 w-2.5 stroke-[2]" /> {label}
-    </button>
+    <div className="relative flex items-center gap-2">
+      <button
+        ref={triggerRef}
+        onClick={() => setOpen(o => !o)}
+        className="group flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors"
+        title={label}
+      >
+        <span
+          className="h-4 w-4 rounded-[4px] border border-border/40 shadow-sm transition-all duration-150 group-hover:scale-110 group-hover:shadow-md"
+          style={{ backgroundColor: value, boxShadow: `0 0 0 2px ${value}22` }}
+        />
+        <Palette className="h-2.5 w-2.5 opacity-60" />
+      </button>
+      {panel}
+    </div>
+  );
+}
+
+// ─── CUSTOM DATE PICKER ───
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const DAYS = ["Su","Mo","Tu","We","Th","Fr","Sa"];
+
+function DatePicker({ value, onChange, label = "Due date", placeholder = "No date" }: { value: string; onChange: (v: string) => void; label?: string; placeholder?: string }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const parsed = value ? new Date(value + "T00:00:00") : null;
+  const now = new Date();
+  const [viewYear, setViewYear] = useState(parsed?.getFullYear() ?? now.getFullYear());
+  const [viewMonth, setViewMonth] = useState(parsed?.getMonth() ?? now.getMonth());
+  const { coords, mounted } = useFloatingPortal(triggerRef as React.RefObject<HTMLElement>, open, 236, 290);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!panelRef.current?.contains(t) && !triggerRef.current?.contains(t)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const firstDay = new Date(viewYear, viewMonth, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const cells: (number | null)[] = [
+    ...Array(firstDay).fill(null),
+    ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
+  ];
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const select = (day: number) => {
+    const iso = `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    onChange(iso);
+    setOpen(false);
+  };
+
+  const prevMonth = () => { if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y - 1); } else setViewMonth(m => m - 1); };
+  const nextMonth = () => { if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y + 1); } else setViewMonth(m => m + 1); };
+
+  const todayStr = today();
+  const isTodayDay = (day: number) => `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}` === todayStr;
+  const isSelected = (day: number) => `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}` === value;
+
+  const calPanel = open && coords !== null && mounted ? createPortal(
+    <div
+      ref={panelRef}
+      style={{ position: "fixed", top: coords!.top, left: coords!.left, zIndex: 9999, width: 236 }}
+      className="bg-background/95 backdrop-blur-2xl border border-border/50 rounded-2xl shadow-2xl p-3 overflow-hidden"
+      onMouseDown={e => e.stopPropagation()}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <button onClick={prevMonth} className="p-1 text-muted-foreground hover:text-foreground hover:bg-muted/40 rounded-lg transition-all">
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+        <span className="text-[10px] font-mono font-semibold uppercase tracking-widest text-foreground">
+          {MONTHS[viewMonth]} {viewYear}
+        </span>
+        <button onClick={nextMonth} className="p-1 text-muted-foreground hover:text-foreground hover:bg-muted/40 rounded-lg transition-all">
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      {/* Day headers */}
+      <div className="grid grid-cols-7 mb-1">
+        {DAYS.map(d => (
+          <span key={d} className="text-center text-[8px] font-mono uppercase tracking-widest text-muted-foreground/50 py-0.5">{d}</span>
+        ))}
+      </div>
+      {/* Days grid */}
+      <div className="grid grid-cols-7 gap-y-0.5">
+        {cells.map((day, i) => (
+          day === null ? <span key={i} /> : (
+            <button
+              key={i}
+              onClick={() => select(day)}
+              className={cn(
+                "h-7 w-7 text-[10px] font-mono rounded-lg transition-all mx-auto flex items-center justify-center",
+                isSelected(day)
+                  ? "bg-foreground text-background font-bold shadow-sm"
+                  : isTodayDay(day)
+                    ? "bg-muted/80 text-foreground ring-1 ring-border/60 font-semibold"
+                    : "text-foreground/70 hover:bg-muted/60 hover:text-foreground"
+              )}
+            >
+              {day}
+            </button>
+          )
+        ))}
+      </div>
+      {/* Footer */}
+      <div className="mt-3 pt-2 border-t border-border/20 flex items-center gap-2">
+        <button
+          onClick={() => { onChange(todayStr); setOpen(false); }}
+          className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded-md hover:bg-muted/40"
+        >
+          Today
+        </button>
+        {value && (
+          <button
+            onClick={() => { onChange(""); setOpen(false); }}
+            className="ml-auto text-[8px] font-mono uppercase tracking-widest text-rose-500/60 hover:text-rose-500 transition-colors px-2 py-1 rounded-md hover:bg-rose-500/10"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+    </div>,
+    document.body
+  ) : null;
+
+  return (
+    <div className="relative flex items-center gap-1.5">
+      <button
+        ref={triggerRef}
+        onClick={() => setOpen(o => !o)}
+        className={cn(
+          "group flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-widest transition-colors",
+          value ? "text-foreground/80 hover:text-foreground" : "text-muted-foreground hover:text-foreground"
+        )}
+        title={label}
+      >
+        <CalendarDays className="h-3 w-3 opacity-60" />
+        <span>{value ? fmtFull(value) : placeholder}</span>
+      </button>
+      {value && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onChange(""); }}
+          className="text-muted-foreground/50 hover:text-rose-500 transition-colors"
+        >
+          <X className="h-2.5 w-2.5" />
+        </button>
+      )}
+      {calPanel}
+    </div>
   );
 }
 
@@ -164,6 +502,18 @@ export default function NorthStarPage() {
   const [addingKR, setAddingKR] = useState<string | null>(null);
   const [addKrDueDate, setAddKrDueDate] = useState<string>("");
   const nextUpScrollRef = useRef<HTMLDivElement>(null);
+
+  // Burndown date range
+  const [sprintStart, setSprintStart] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - d.getDay()); // start of current week
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  });
+  const [sprintEnd, setSprintEnd] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + (13 - d.getDay())); // 2 weeks from start of week
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  });
 
   // Aggregate Objective Milestones
   const aggregatedMilestones = useMemo(() => {
@@ -302,19 +652,55 @@ export default function NorthStarPage() {
       ? "Execution lag detected—tighten KR focus."
       : "Strategic drift high. Reconnect objectives to KRs.";
 
+  // ─── Real-time burndown derived from date range + live completion ───
   const burndownData = useMemo(() => {
-    if (!totalObjs && northStarKRs.length === 0) return [];
-    const weeks = 6;
-    const plannedStart = 100;
-    const plannedStep = plannedStart / (weeks - 1);
-    const actualEnd = Math.max(0, 100 - avgProgress);
-    const actualStep = (plannedStart - actualEnd) / (weeks - 1 || 1);
-    return Array.from({ length: weeks }, (_, i) => ({
-      w: `W${i + 1}`,
-      planned: Math.max(0, Math.round(plannedStart - plannedStep * i)),
-      actual: Math.max(actualEnd, Math.round(plannedStart - actualStep * i)),
-    }));
-  }, [avgProgress, totalObjs, northStarKRs.length]);
+    if (!sprintStart || !sprintEnd) return [];
+    const start = new Date(sprintStart + "T00:00:00");
+    const end = new Date(sprintEnd + "T00:00:00");
+    const nowMs = Date.now();
+    const totalMs = end.getTime() - start.getTime();
+    if (totalMs <= 0) return [];
+
+    // Total work units = number of milestones across all objectives
+    const allMilestones = objs.flatMap(o => o.keyResults);
+    const totalWork = allMilestones.length;
+    const doneWork = allMilestones.filter(kr => kr.progress >= 100).length;
+    // Remaining work
+    const remaining = totalWork - doneWork;
+
+    // Build day-by-day points capped to today
+    const dayMs = 1000 * 60 * 60 * 24;
+    const totalDays = Math.round(totalMs / dayMs);
+    const cappedDays = Math.min(totalDays, Math.round((nowMs - start.getTime()) / dayMs));
+
+    // Ideal burndown slope: totalWork → 0 over totalDays
+    const points: { label: string; planned: number; actual: number | null; isToday?: boolean }[] = [];
+    const step = Math.max(1, Math.floor(totalDays / 10)); // sample ~10 points
+
+    for (let d = 0; d <= totalDays; d += step) {
+      const date = new Date(start.getTime() + d * dayMs);
+      const label = fmt(date);
+      const planned = totalWork > 0 ? Math.max(0, Math.round(totalWork * (1 - d / totalDays))) : 0;
+      const isPast = d <= cappedDays;
+      // Actual remaining: interpolate linearly between start (totalWork) and now (remaining)
+      const actual: number | null = isPast
+        ? Math.max(0, Math.round(totalWork - (doneWork * (d / Math.max(cappedDays, 1)))))  
+        : null;
+      const isT = Math.abs(d - cappedDays) < step / 2;
+      points.push({ label, planned, actual, isToday: isT });
+    }
+    // Always include the end point
+    if (totalDays % step !== 0) {
+      const isPastEnd = cappedDays >= totalDays;
+      points.push({
+        label: fmt(end),
+        planned: 0,
+        actual: isPastEnd ? remaining : null,
+        isToday: false,
+      });
+    }
+    return points;
+  }, [sprintStart, sprintEnd, objs]);
 
   // ─── Helpers
 
@@ -324,8 +710,8 @@ export default function NorthStarPage() {
     setObjs(prev => prev.map(o => o.keyResultId === id ? { ...o, keyResultId: null } : o));
   };
   const addObj = (title: string) => {
+    // keyResultId is optional — allow objectives without a linked KR
     const linkedKrId = addObjLinkId ?? northStarKRs[0]?.id ?? null;
-    if (!linkedKrId) return;
     setObjs(prev => [...prev, {
       id: uid(),
       tier: addObjTier,
@@ -422,7 +808,7 @@ export default function NorthStarPage() {
     <div className="flex h-full flex-col gap-4 min-h-0 antialiased font-sans select-none overflow-hidden">
 
       {/* ═══ STATUS BAR ═══ */}
-      <header className="shrink-0 flex items-center justify-between pb-4">
+      <header className="shrink-0 flex items-center justify-between pb-6 px-2">
         <div className="flex items-center gap-6 text-[10px] font-mono uppercase tracking-[0.15em] text-muted-foreground">
           <span className="flex items-center justify-center p-2 bg-background border border-border/40 rounded-xl shadow-sm">
             <Target className="h-4 w-4 stroke-[1.5] text-foreground" />
@@ -441,10 +827,10 @@ export default function NorthStarPage() {
       </header>
 
       {/* ═══ MAIN 3-COL ═══ */}
-  <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[322px_1fr_322px] xl:grid-cols-[368px_1fr_368px] gap-6 overflow-hidden">
+      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[320px_1fr_320px] xl:grid-cols-[340px_1fr_340px] gap-6 xl:gap-8 overflow-hidden px-2 pb-2">
 
         {/* ─── COL 1: NORTH STAR + MILESTONES ─── */}
-        <div className="flex flex-col gap-6 min-h-0 overflow-hidden">
+        <div className="flex flex-col gap-6 xl:gap-8 min-h-0 overflow-hidden">
 
           {/* The North Star */}
           <div className="flex flex-col border border-border/20 bg-background/60 backdrop-blur-xl shrink-0 rounded-2xl shadow-sm overflow-hidden relative">
@@ -510,53 +896,50 @@ export default function NorthStarPage() {
                       onCancel={() => { setEditingNorthStarKRId(null); setEditDraft(""); }}
                     />
                   ) : (
-                    <div key={kr.id} className="group flex flex-col gap-1.5">
-                      <div className="flex items-start gap-2">
-                        <input
-                          type="color"
+                    <div key={kr.id} className="group flex flex-col gap-2 p-2.5 rounded-xl border border-transparent hover:border-border/10 hover:bg-muted/5 transition-colors">
+                      <div className="flex items-start gap-2.5">
+                        <ColorPicker
                           value={kr.color ?? "#64748b"}
-                          onChange={(e) => setNorthStarKRs(prev => prev.map(k => k.id === kr.id ? { ...k, color: e.target.value } : k))}
-                          className="h-4 w-4 rounded border border-border/30 bg-transparent p-0.5"
-                          title="Key result color"
+                          onChange={(c) => setNorthStarKRs(prev => prev.map(k => k.id === kr.id ? { ...k, color: c } : k))}
                         />
                         <button
                           onDoubleClick={() => { setEditingNorthStarKRId(kr.id); setEditDraft(kr.title); }}
-                          className="text-left text-[11px] text-foreground leading-tight flex-1"
+                          className="text-left text-[11.5px] font-medium text-foreground leading-tight flex-1"
                         >
                           {kr.title}
                         </button>
-                        <input
-                          type="date"
-                          value={kr.dueDate ?? ""}
-                          onChange={(e) => setNorthStarKRs(prev => prev.map(k => k.id === kr.id ? { ...k, dueDate: e.target.value || null } : k))}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity text-[9px] font-mono text-muted-foreground bg-transparent border border-border/30 px-1 py-0.5 rounded outline-none"
-                          title="Key result due date"
-                        />
-                        <button onClick={() => deleteNorthStarKR(kr.id)} className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 text-muted-foreground hover:text-rose-500"><Trash2 className="h-2.5 w-2.5 stroke-[1.5]" /></button>
+                        <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                          <DatePicker
+                            value={kr.dueDate ?? ""}
+                            onChange={(v) => setNorthStarKRs(prev => prev.map(k => k.id === kr.id ? { ...k, dueDate: v || null } : k))}
+                            placeholder="Due date"
+                          />
+                        </div>
+                        <button onClick={() => deleteNorthStarKR(kr.id)} className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 text-muted-foreground hover:text-rose-500"><Trash2 className="h-3 w-3 stroke-[1.5]" /></button>
                       </div>
-                      <div className="flex items-center gap-2 ml-3.5">
-                        <div className="flex-1 h-[2px] bg-border/20"><div className={cn("h-full", statusColor[kr.status])} style={{ width: `${kr.progress}%`, opacity: 0.5, backgroundColor: kr.color ?? undefined }} /></div>
-                        <span className="text-[9px] font-mono tabular-nums text-muted-foreground">{kr.progress}%</span>
+                      <div className="flex items-center gap-2 pl-[22px]">
+                        <div className="flex-1 h-[2.5px] bg-border/20 rounded-full overflow-hidden"><div className={cn("h-full rounded-full", statusColor[kr.status])} style={{ width: `${kr.progress}%`, opacity: 0.8, backgroundColor: kr.color ?? undefined }} /></div>
+                        <span className="text-[10px] font-mono tabular-nums font-bold text-muted-foreground/80">{kr.progress}%</span>
                         {kr.dueDate && (
                           <span className={cn(
-                            "text-[8px] font-mono uppercase tracking-widest border px-1 py-0.5 rounded",
+                            "text-[8px] font-mono uppercase tracking-widest border px-1.5 py-0.5 rounded-md",
                             new Date(kr.dueDate).getTime() < Date.now() && kr.progress < 100
                               ? "text-rose-500 border-rose-500/30 bg-rose-500/10"
-                              : "text-muted-foreground border-border/40 bg-muted/20"
+                              : "text-muted-foreground border-border/20 bg-muted/10"
                           )}>
                             {new Date(kr.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                           </span>
                         )}
-                        <span className="text-[9px] font-mono text-muted-foreground">
+                        <span className="text-[8px] font-mono text-muted-foreground/50 border border-border/10 rounded-md px-1.5 py-0.5 bg-background">
                           {objs.filter((o) => o.keyResultId === kr.id).filter((o) => o.progress >= 100).length}/
-                          {objs.filter((o) => o.keyResultId === kr.id).length} objectives
+                          {objs.filter((o) => o.keyResultId === kr.id).length} objs
                         </span>
                       </div>
                     </div>
                   )
                 ))}
                 {northStar && addingNorthStarKR ? (
-                  <div className="bg-background border border-emerald-500/30 rounded-lg p-1.5 flex flex-col gap-2">
+                  <div className="bg-background border border-border/20 shadow-sm rounded-xl p-3 flex flex-col gap-3 mt-1">
                     <InlineInput
                       placeholder="Key result title..."
                       onSubmit={val => {
@@ -578,25 +961,20 @@ export default function NorthStarPage() {
                         setAddNorthStarKRColor("#64748b");
                       }}
                     />
-                    <div className="flex items-center gap-4 px-2 pb-1">
-                      <div className="flex items-center gap-2">
-                        <label className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">Color</label>
-                        <input
-                          type="color"
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <ColorPicker
                           value={addNorthStarKRColor}
-                          onChange={(e) => setAddNorthStarKRColor(e.target.value)}
-                          className="h-5 w-5 rounded cursor-pointer border border-border/30 bg-transparent p-0"
+                          onChange={setAddNorthStarKRColor}
+                          label="Color"
                         />
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <label className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">Due Date</label>
-                        <input
-                          type="date"
+                        <DatePicker
                           value={addNorthStarKRDueDate}
-                          onChange={(e) => setAddNorthStarKRDueDate(e.target.value)}
-                          className="text-[9px] font-mono bg-muted/20 border border-border/30 rounded px-1.5 py-0.5 text-foreground outline-none"
+                          onChange={setAddNorthStarKRDueDate}
+                          placeholder="Due date"
                         />
                       </div>
+                      <span className="text-[9px] font-mono text-muted-foreground/45 uppercase tracking-widest">New KR</span>
                     </div>
                   </div>
                 ) : northStar ? (
@@ -606,9 +984,9 @@ export default function NorthStarPage() {
                       setAddNorthStarKRColor("#64748b");
                       setAddNorthStarKRDueDate("");
                     }}
-                    className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors mt-1"
+                    className="flex items-center justify-center gap-1.5 px-4 py-2.5 mt-2 border border-dashed border-border/30 rounded-xl text-[9px] font-mono uppercase tracking-widest text-muted-foreground/60 hover:text-foreground hover:bg-muted/10 hover:border-border/50 transition-all shrink-0"
                   >
-                    <Plus className="h-2.5 w-2.5 stroke-[2]" /> Add Key Result
+                    <Plus className="h-3 w-3 stroke-[2]" /> Add Key Result
                   </button>
                 ) : null}
               </div>
@@ -620,39 +998,41 @@ export default function NorthStarPage() {
             <SectionHead 
               title="Next Up" 
               icon={Milestone} 
-              badge={<span className="text-[9px] font-mono text-muted-foreground bg-muted/40 px-1.5 py-0.5 rounded">{completedMilestonesCount}/{aggregatedMilestones.length}</span>} 
+              badge={<span className="text-[9px] font-mono text-muted-foreground bg-muted/40 px-1.5 py-0.5 rounded-md border border-border/20 shadow-sm">{completedMilestonesCount}/{aggregatedMilestones.length}</span>} 
             />
-            <div ref={nextUpScrollRef} className="flex-1 flex flex-col min-h-0 overflow-y-auto scrollbar-hide py-2">
+            <div ref={nextUpScrollRef} className="flex-1 flex flex-col min-h-0 overflow-y-auto scrollbar-hide p-3 gap-2 bg-muted/5">
               {aggregatedMilestones.length === 0 ? (
                 <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-4">
                   <Milestone className="h-6 w-6 stroke-[1.5] text-muted-foreground/30" />
                   <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground/50">No milestones</span>
                 </div>
               ) : aggregatedMilestones.map(m => (
-                <div key={m.id} className="group flex flex-col gap-1.5 px-4 py-3 border-b border-border/10 last:border-0 hover:bg-muted/10 transition-colors cursor-pointer shrink-0">
-                  <div className="flex items-center gap-3">
+                <div key={m.id} className="group flex flex-col gap-2 px-3.5 py-3 rounded-xl border border-border/15 bg-background shadow-sm hover:border-border/30 hover:shadow-md transition-all cursor-pointer shrink-0">
+                  <div className="flex items-start gap-3">
                     <button
                       onClick={() => toggleNextUpMilestone(m.objId, m.id, m.progress)}
                       className={cn(
-                        "h-3.5 w-3.5 shrink-0 rounded-[4px] border-[1.5px] transition-all flex items-center justify-center",
+                        "mt-0.5 h-4 w-4 shrink-0 rounded-[4px] border-[1.5px] transition-all flex items-center justify-center",
                         m.progress >= 100
                           ? "border-emerald-500 bg-emerald-500"
                           : "border-muted-foreground/30 hover:border-foreground/50 bg-transparent",
                       )}
                       aria-label={m.progress >= 100 ? "Mark milestone incomplete" : "Mark milestone complete"}
                     >
-                      {m.progress >= 100 && <Check className="h-2.5 w-2.5 text-background stroke-3" />}
+                      {m.progress >= 100 && <Check className="h-3 w-3 text-background stroke-3" />}
                     </button>
-                    <span
-                      className={cn("text-[12px] font-medium truncate flex-1 text-left leading-tight", m.progress >= 100 ? "text-muted-foreground/50 line-through decoration-muted-foreground/20" : "text-foreground")}
-                    >
-                      {m.title}
-                    </span>
+                    <div className="flex flex-col flex-1 min-w-0 pr-2">
+                      <span
+                        className={cn("text-[12.5px] font-medium truncate w-full text-left leading-tight", m.progress >= 100 ? "text-muted-foreground/50 line-through decoration-muted-foreground/20" : "text-foreground")}
+                      >
+                        {m.title}
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 pl-6">
-                    <div className="h-1.5 w-1.5 shrink-0 rounded-[2px]" style={{ backgroundColor: m.objColor ?? "#64748b" }} />
-                    <span className="text-[9px] font-medium text-muted-foreground/70 truncate flex-1">{m.objTitle}</span>
-                    <span className="text-[8px] font-mono border border-border/40 px-1 py-0.5 rounded text-muted-foreground/60 bg-muted/20">{m.objTier}</span>
+                  <div className="flex items-center gap-2 pl-7">
+                    <div className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: m.objColor ?? "#64748b" }} />
+                    <span className="text-[9.5px] font-medium text-muted-foreground/75 truncate flex-1 leading-none">{m.objTitle}</span>
+                    <span className="text-[8px] font-mono border border-border/40 px-1.5 py-0.5 rounded text-muted-foreground/60 bg-muted/20">{m.objTier}</span>
                   </div>
                 </div>
               ))}
@@ -666,404 +1046,359 @@ export default function NorthStarPage() {
             title="Objectives"
             icon={Flag}
             badge={
-              <div className="flex items-center gap-2">
-                <span className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground bg-emerald-500/10 text-emerald-500/80 px-1.5 py-0.5 rounded">{completedObjectives}/{totalObjs}</span>
-                {activeTier && (
-                  <button onClick={() => setActiveTier(null)} className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors bg-muted/40 px-1.5 py-0.5 rounded">Clear ×</button>
-                )}
-                <span className="text-[9px] font-mono text-muted-foreground bg-muted/20 px-1.5 py-0.5 rounded border border-border/30">{filteredObjs.length}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[8px] font-mono text-emerald-500/80 bg-emerald-500/10 px-1.5 py-0.5 rounded-md border border-emerald-500/20">{completedObjectives}/{totalObjs}</span>
+                <span className="text-[8px] font-mono text-muted-foreground bg-muted/30 px-1.5 py-0.5 rounded-md border border-border/20">{filteredObjs.length} shown</span>
               </div>
             }
           />
-          <div className="flex flex-col gap-2 px-4 py-2 border-b border-border/10">
-            <div className="flex items-center gap-2">
+
+          {/* ── Compact Filter Bar ── */}
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border/10 shrink-0">
+            <div className="flex items-center gap-1.5 flex-1 min-w-0 bg-muted/25 border border-border/20 rounded-lg px-2 h-7">
+              <Search className="h-3 w-3 text-muted-foreground/50 shrink-0" />
               <input
                 value={objectiveQuery}
                 onChange={(e) => setObjectiveQuery(e.target.value)}
-                placeholder="Search objectives, tier, linked KR..."
-                className="h-7 flex-1 min-w-0 bg-transparent border border-border/30 px-2 text-[10px] font-mono text-foreground placeholder:text-muted-foreground/50 outline-none"
+                placeholder="Search…"
+                className="flex-1 min-w-0 bg-transparent text-[10px] font-mono text-foreground placeholder:text-muted-foreground/40 outline-none"
               />
-              <select
-                value={objectiveStatus}
-                onChange={(e) => setObjectiveStatus(e.target.value as "all" | Status)}
-                className="h-7 bg-transparent border border-border/30 px-2 text-[9px] font-mono text-muted-foreground"
-              >
-                <option value="all">All statuses</option>
-                <option value="on-track">On track</option>
-                <option value="at-risk">At risk</option>
-                <option value="behind">Behind</option>
-              </select>
-              <select
-                value={objectiveSort}
-                onChange={(e) => setObjectiveSort(e.target.value as "progress-desc" | "progress-asc" | "az" | "tier")}
-                className="h-7 bg-transparent border border-border/30 px-2 text-[9px] font-mono text-muted-foreground"
-              >
-                <option value="progress-desc">Progress ↓</option>
-                <option value="progress-asc">Progress ↑</option>
-                <option value="tier">Tier</option>
-                <option value="az">A → Z</option>
-              </select>
+              {objectiveQuery && (
+                <button onClick={() => setObjectiveQuery("")} className="shrink-0 text-muted-foreground/50 hover:text-foreground transition-colors">
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              )}
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1 shrink-0">
               {tierList.map((t) => (
                 <button
                   key={t}
                   onClick={() => setActiveTier(activeTier === t ? null : t)}
                   className={cn(
-                    "px-2 py-1 text-[8px] font-mono uppercase tracking-widest border transition-colors",
+                    "px-1.5 h-7 text-[8px] font-mono uppercase tracking-widest rounded-md border transition-all",
                     activeTier === t
-                      ? "border-foreground/40 text-foreground bg-muted/20"
-                      : "border-border/30 text-muted-foreground hover:text-foreground",
+                      ? "border-foreground/50 bg-foreground text-background"
+                      : "border-border/25 text-muted-foreground hover:text-foreground hover:border-border/50",
                   )}
                 >
-                  {t}
+                  {t[0]}
                 </button>
               ))}
-              <div className="ml-auto flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-widest text-muted-foreground/80">
-                <span className="border border-emerald-500/30 px-1.5 py-0.5">On track {objectiveStatusCounts["on-track"]}</span>
-                <span className="border border-amber-500/30 px-1.5 py-0.5">At risk {objectiveStatusCounts["at-risk"]}</span>
-                <span className="border border-rose-500/30 px-1.5 py-0.5">Behind {objectiveStatusCounts.behind}</span>
-              </div>
             </div>
+            <select
+              value={objectiveSort}
+              onChange={(e) => setObjectiveSort(e.target.value as typeof objectiveSort)}
+              className="h-7 bg-transparent border border-border/20 rounded-lg px-1.5 text-[9px] font-mono text-muted-foreground outline-none shrink-0"
+            >
+              <option value="progress-desc">↓ %</option>
+              <option value="progress-asc">↑ %</option>
+              <option value="tier">Tier</option>
+              <option value="az">A–Z</option>
+            </select>
+            <select
+              value={objectiveStatus}
+              onChange={(e) => setObjectiveStatus(e.target.value as "all" | Status)}
+              className="h-7 bg-transparent border border-border/20 rounded-lg px-1.5 text-[9px] font-mono text-muted-foreground outline-none shrink-0"
+            >
+              <option value="all">All</option>
+              <option value="on-track">✓</option>
+              <option value="at-risk">⚠</option>
+              <option value="behind">✕</option>
+            </select>
           </div>
-          <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide p-3 space-y-3 bg-muted/5">
+
+          {/* ── Status strip ── */}
+          <div className="flex items-center gap-0 px-3 py-1.5 border-b border-border/5 shrink-0">
+            {[
+              { label: "On track", count: objectiveStatusCounts["on-track"], bg: "bg-emerald-500" },
+              { label: "At risk",  count: objectiveStatusCounts["at-risk"],  bg: "bg-amber-500"  },
+              { label: "Behind",   count: objectiveStatusCounts.behind,      bg: "bg-rose-500"   },
+            ].map(({ label, count, bg }) => (
+              <div key={label} className="flex items-center gap-1.5 mr-4">
+                <span className={cn("h-1.5 w-1.5 rounded-full", bg)} />
+                <span className="text-[8px] font-mono text-muted-foreground/55 uppercase tracking-widest">
+                  {label} <span className="text-foreground/60 font-bold">{count}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* ── Objective list ── */}
+          <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide flex flex-col p-3 bg-muted/5">
             {filteredObjs.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-32 gap-2 text-center border border-dashed border-border/40 bg-background rounded-xl">
-                <Target className="h-6 w-6 stroke-[1.5] text-muted-foreground/30" />
-                <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground/70">No objectives match</span>
+              <div className="flex flex-col items-center justify-center flex-1 gap-2 text-center py-8">
+                <Target className="h-6 w-6 stroke-[1.5] text-muted-foreground/20" />
+                <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/35">No objectives match</span>
               </div>
             )}
-            {filteredObjs.map(obj => (
-              <div key={obj.id} className={cn(
-                "flex flex-col bg-background rounded-xl transition-all duration-200 overflow-hidden",
-                expandedObj === obj.id ? "border border-border/50 shadow-md" : "border border-border/20 shadow-sm hover:border-border/40 hover:shadow-md"
-              )}>
-                {/* Objective row (Card Header) */}
-                <div 
-                  className="group flex flex-col p-4 cursor-pointer relative" 
-                  onClick={() => toggleObjectiveExpanded(obj.id)}
+
+            {filteredObjs.map((obj, idx) => {
+              const isExpanded = expandedObj === obj.id;
+              const isOverdue = obj.dueDate && new Date(obj.dueDate) < new Date() && obj.progress < 100;
+              const completedKRs = obj.keyResults.filter(k => k.progress >= 100).length;
+              const STATUS_DOT = { "on-track": "bg-emerald-500", "at-risk": "bg-amber-500", "behind": "bg-rose-500" }[obj.status];
+              const TIER_COLOR = {
+                Decade:  "text-violet-400 bg-violet-500/10 border-violet-500/20",
+                Year:    "text-indigo-400 bg-indigo-500/10 border-indigo-500/20",
+                Quarter: "text-cyan-400 bg-cyan-500/10 border-cyan-500/20",
+                Month:   "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+              }[obj.tier];
+
+              return (
+                <div
+                  key={obj.id}
+                  className={cn(
+                    "group/obj flex flex-col transition-all duration-300 shrink-0 overflow-hidden",
+                    idx > 0 && "border-t border-border/10",
+                    isExpanded ? "bg-background border-border/20 shadow-sm" : "hover:bg-muted/10",
+                  )}
                 >
-                  <div className="flex items-start justify-between mb-2">
-                    <div className="flex items-center gap-2 overflow-hidden pr-2">
-                      <span
-                        className="h-3 w-3 shrink-0 rounded-[3px] border border-border/40 shadow-sm"
-                        style={{ backgroundColor: obj.color ?? "#64748b" }}
-                      />
-                      <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/80 shrink-0">{obj.tier}</span>
-                      <span className={cn("text-[9px] font-mono uppercase tracking-widest px-1.5 py-0.5 rounded-md border shrink-0", statusPillColor[obj.status])}>{statusText[obj.status]}</span>
-                      {obj.keyResultId && (
-                        <span className="text-[9px] font-mono text-muted-foreground/50 truncate hidden sm:block">
-                          → {mainKrTitleById[obj.keyResultId]}
+                  {/* Compact header row */}
+                  <div className="flex items-center gap-0 cursor-pointer" onClick={() => toggleObjectiveExpanded(obj.id)}>
+                    <div
+                      className="w-1 self-stretch shrink-0 transition-all duration-300"
+                      style={{ backgroundColor: obj.color ?? "#64748b", opacity: isExpanded ? 1 : 0.6 }}
+                    />
+                    <div className="flex items-center gap-3 flex-1 min-w-0 px-4 py-3.5">
+                      <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT)} />
+                      {editingObjectiveId === obj.id ? (
+                        <div className="flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
+                          <InlineInput
+                            placeholder="Objective title..."
+                            initialValue={editDraft || obj.title}
+                            onSubmit={(val) => { setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, title: val } : o)); setEditingObjectiveId(null); setEditDraft(""); }}
+                            onCancel={() => { setEditingObjectiveId(null); setEditDraft(""); }}
+                          />
+                        </div>
+                      ) : (
+                        <button
+                          onDoubleClick={(e) => { e.stopPropagation(); setEditingObjectiveId(obj.id); setEditDraft(obj.title); }}
+                          className="text-left text-[12px] font-medium text-foreground leading-tight flex-1 min-w-0 truncate"
+                        >
+                          {obj.title}
+                        </button>
+                      )}
+                      <span className={cn("shrink-0 text-[7px] font-mono uppercase tracking-widest px-1.5 py-0.5 rounded-md border", TIER_COLOR)}>{obj.tier[0]}</span>
+                      {obj.dueDate && (
+                        <span className={cn(
+                          "shrink-0 text-[8px] font-mono px-1.5 py-0.5 rounded border",
+                          isOverdue ? "text-rose-400 border-rose-500/30 bg-rose-500/10" : "text-muted-foreground/55 border-border/20"
+                        )}>
+                          {new Date(obj.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                         </span>
                       )}
-                    </div>
-                    <div className="flex items-center gap-3 shrink-0">
-                      <span className="text-[13px] font-mono font-bold tabular-nums text-foreground">{obj.progress}%</span>
-                      <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", expandedObj === obj.id && "rotate-180")} />
+                      <span className={cn(
+                        "shrink-0 text-[12px] font-mono font-bold tabular-nums w-9 text-right tracking-tight",
+                        obj.progress >= 100 ? "text-emerald-500" : obj.progress >= 50 ? "text-foreground" : "text-muted-foreground/80"
+                      )}>{obj.progress}%</span>
+                      <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform duration-300 ml-1", isExpanded ? "rotate-180 text-foreground" : "text-muted-foreground/40")} />
                     </div>
                   </div>
 
-                  {editingObjectiveId === obj.id ? (
-                    <div className="my-1 py-1 pr-6" onClick={(e) => e.stopPropagation()}>
-                      <InlineInput
-                        placeholder="Objective title..."
-                        initialValue={editDraft || obj.title}
-                        onSubmit={(val) => { setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, title: val } : o)); setEditingObjectiveId(null); setEditDraft(""); }}
-                        onCancel={() => { setEditingObjectiveId(null); setEditDraft(""); }}
-                      />
-                    </div>
-                  ) : (
-                    <button
-                      onDoubleClick={(e) => { e.stopPropagation(); setEditingObjectiveId(obj.id); setEditDraft(obj.title); }}
-                      className="text-left text-[14px] font-semibold text-foreground tracking-tight leading-snug pr-8 break-words"
-                    >
-                      {obj.title}
-                    </button>
-                  )}
-
-                  <div className="flex items-center gap-4 mt-4">
-                    <div className="h-1.5 w-full bg-muted/60 rounded-full overflow-hidden flex-1 relative">
-                      <div
-                        className={cn("h-full rounded-full transition-all duration-500", statusColor[obj.status])}
-                        style={{ width: `${obj.progress}%`, backgroundColor: obj.color ?? undefined }}
-                      />
-                    </div>
-                    {obj.dueDate && (
-                      <span className={cn("text-[9px] font-mono tracking-widest shrink-0 border px-1.5 py-0.5 rounded", 
-                        new Date(obj.dueDate) < new Date() && obj.progress < 100 ? "text-rose-500 border-rose-500/30 bg-rose-500/10" : "text-muted-foreground border-border/40"
-                      )}>
-                        DUE: {new Date(obj.dueDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                      </span>
-                    )}
-                    <span className="text-[10px] font-mono text-muted-foreground/70 shrink-0">{obj.keyResults.length} Milestones</span>
+                  {/* Thin progress bar */}
+                  <div className="h-[2px] bg-border/5 mx-5 mb-1.5 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${obj.progress}%`, backgroundColor: obj.color ?? "#64748b" }} />
                   </div>
-                </div>
 
-                {/* Expanded: Key Results */}
-                {expandedObj === obj.id && (
-                  <div className="flex flex-col bg-muted/5 border-t border-border/10 p-4 pt-3 gap-3">
-                    <div className="flex items-center justify-between pb-2 border-b border-border/5">
-                      <span className="text-[10px] font-mono uppercase tracking-widest text-foreground/80 font-bold">Execution Plan</span>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setObjectiveMilestoneState(obj.id, true)}
-                          className="text-[9px] font-mono uppercase tracking-widest border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 rounded-md text-emerald-600 transition-colors hover:bg-emerald-500/20"
-                        >
-                          Complete all
-                        </button>
-                        <button
-                          onClick={() => setObjectiveMilestoneState(obj.id, false)}
-                          className="text-[9px] font-mono uppercase tracking-widest border border-border/40 bg-background px-2 py-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                        >
-                          Reset
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col gap-2">
-                      {obj.keyResults.map(kr => (
-                        <div key={kr.id} className="group/kr flex items-center gap-3 bg-background border border-border/20 rounded-lg p-2 transition-all hover:border-border/40 hover:shadow-sm">
-                          {editingObjectiveKR?.objId === obj.id && editingObjectiveKR?.krId === kr.id ? (
-                            <div className="flex-1 min-w-0 pb-0.5">
-                              <InlineInput
-                                placeholder="Milestone title..."
-                                initialValue={editDraft || kr.title}
-                                onSubmit={(val) => {
-                                  setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, keyResults: o.keyResults.map(k => k.id === kr.id ? { ...k, title: val } : k) } : o));
-                                  setEditingObjectiveKR(null);
-                                  setEditDraft("");
-                                }}
-                                onCancel={() => { setEditingObjectiveKR(null); setEditDraft(""); }}
-                              />
-                            </div>
-                          ) : (
+                  {/* Expanded drawer */}
+                  {isExpanded && (
+                    <div className="flex flex-col border-t border-border/10 bg-muted/5 px-2 pb-2">
+                      {/* Drawer toolbar */}
+                      <div className="flex items-center justify-between px-3 py-2 border-b border-border/8" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center gap-3">
+                          <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/55">
+                            {completedKRs}/{obj.keyResults.length} milestones
+                          </span>
+                          {obj.keyResults.length > 0 && (
                             <>
-                              <button
-                                onClick={() => {
-                                  const isDone = kr.progress >= 100;
-                                  setObjs(prev => prev.map(o => o.id === obj.id ? {
-                                    ...o,
-                                    keyResults: o.keyResults.map(k => k.id === kr.id ? {
-                                      ...k,
-                                      progress: isDone ? 0 : 100,
-                                      status: isDone ? "behind" : "on-track",
-                                    } : k),
-                                  } : o));
-                                }}
-                                className={cn(
-                                  "h-4 w-4 shrink-0 rounded-[4px] border-[1.5px] transition-all flex items-center justify-center",
-                                  kr.progress >= 100
-                                    ? "border-emerald-500 bg-emerald-500"
-                                    : "border-muted-foreground/30 hover:border-muted-foreground/60 bg-transparent",
-                                )}
-                                aria-label={kr.progress >= 100 ? "Mark milestone incomplete" : "Mark milestone complete"}
-                              >
-                                {kr.progress >= 100 && <Check className="h-3 w-3 text-background stroke-[3]" />}
-                              </button>
-                              
-                              <button
-                                onDoubleClick={() => { setEditingObjectiveKR({ objId: obj.id, krId: kr.id }); setEditDraft(kr.title); }}
-                                className={cn(
-                                  "text-left text-[12px] flex-1 truncate transition-colors font-medium",
-                                  kr.progress >= 100 ? "text-muted-foreground/60 line-through decoration-muted-foreground/30" : "text-foreground/90"
-                                )}
-                              >
-                                {kr.title}
-                              </button>
-
-                              <div className="flex items-center gap-2 opacity-0 group-hover/kr:opacity-100 transition-opacity">
-                                <input
-                                  type="date"
-                                  value={kr.dueDate ?? ""}
-                                  onChange={(e) => {
-                                    setObjs(prev => prev.map(o => o.id === obj.id ? {
-                                      ...o,
-                                      keyResults: o.keyResults.map(k => k.id === kr.id ? { ...k, dueDate: e.target.value || null } : k)
-                                    } : o));
-                                  }}
-                                  className="text-[9px] font-mono text-muted-foreground bg-transparent border border-border/30 px-1 py-0.5 rounded outline-none"
-                                />
-                                <button onClick={() => deleteKRFromObj(obj.id, kr.id)} className="p-1.5 text-muted-foreground hover:text-rose-500 transition-all rounded-md hover:bg-rose-500/10">
-                                  <Trash2 className="h-3 w-3 stroke-[1.5]" />
-                                </button>
-                              </div>
+                              <button onClick={() => setObjectiveMilestoneState(obj.id, true)} className="text-[8px] font-mono uppercase tracking-widest text-emerald-500/70 hover:text-emerald-500 transition-colors">All done</button>
+                              <button onClick={() => setObjectiveMilestoneState(obj.id, false)} className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground/50 hover:text-muted-foreground transition-colors">Reset</button>
                             </>
                           )}
                         </div>
-                      ))}
-                      
-                      {addingKR === obj.id ? (
-                        <div className="bg-background border border-emerald-500/30 rounded-lg p-1.5 flex flex-col gap-2">
-                          <InlineInput
-                            placeholder="New milestone..."
-                            onSubmit={val => addKRToObj(obj.id, val)}
-                            onCancel={() => { setAddingKR(null); setAddKrDueDate(""); }}
-                          />
-                          <div className="flex items-center gap-2 px-2 pb-1">
-                            <label className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">Due Date</label>
-                            <input
-                              type="date"
-                              value={addKrDueDate}
-                              onChange={(e) => setAddKrDueDate(e.target.value)}
-                              className="text-[9px] font-mono bg-muted/20 border border-border/30 rounded px-1.5 py-0.5 text-foreground outline-none"
-                            />
-                          </div>
+                        <div className="flex items-center gap-2">
+                          <ColorPicker value={obj.color ?? "#64748b"} onChange={(c) => setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, color: c } : o))} label="Color" />
+                          <span className="h-3 w-px bg-border/30" />
+                          <DatePicker value={obj.dueDate ?? ""} onChange={(v) => setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, dueDate: v || null } : o))} placeholder="Due date" />
+                          <span className="h-3 w-px bg-border/30" />
+                          <button onClick={() => deleteObj(obj.id)} className="text-muted-foreground/35 hover:text-rose-500 transition-colors p-0.5"><Trash2 className="h-3 w-3 stroke-[1.5]" /></button>
                         </div>
-                      ) : (
-                        <button 
-                          onClick={() => setAddingKR(obj.id)} 
-                          className="flex items-center gap-2 mt-1 text-[10px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground transition-colors p-2 border border-dashed border-border/40 rounded-lg justify-center hover:bg-muted/50"
-                        >
-                          <Plus className="h-3 w-3 stroke-2" /> Add Milestone
-                        </button>
-                      )}
-                    </div>
-                    
-                    {/* Settings row for the expanded card */}
-                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-border/5">
-                      <div className="flex items-center gap-3">
-                        <label className="group flex items-center gap-2 cursor-pointer">
-                          <div className="relative flex items-center justify-center">
-                            <input
-                              type="color"
-                              value={obj.color ?? "#64748b"}
-                              onChange={(e) => setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, color: e.target.value } : o))}
-                              className="h-5 w-5 rounded cursor-pointer opacity-0 absolute inset-0 z-10"
-                            />
-                            <div className="h-4 w-4 rounded-sm border border-border/40 shadow-sm transition-transform group-hover:scale-110" style={{ backgroundColor: obj.color ?? "#64748b" }} />
-                          </div>
-                          <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground group-hover:text-foreground transition-colors">Color</span>
-                        </label>
-                        <div className="h-3 w-px bg-border/40" />
-                        <label className="group flex items-center gap-2 cursor-pointer">
-                          <input
-                            type="date"
-                            value={obj.dueDate ?? ""}
-                            onChange={(e) => setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, dueDate: e.target.value || null } : o))}
-                            className="text-[9px] font-mono text-muted-foreground bg-transparent border border-border/30 px-1 py-0.5 rounded outline-none"
-                          />
-                        </label>
                       </div>
-                      <button onClick={() => deleteObj(obj.id)} className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-widest text-muted-foreground hover:text-rose-500 transition-colors px-2 py-1 rounded hover:bg-rose-500/10">
-                        <Trash2 className="h-3 w-3 stroke-[1.5]" /> Delete Objective
-                      </button>
-                    </div>
 
-                  </div>
-                )}
-              </div>
-            ))}
+                      {/* Milestone rows */}
+                      <div className="flex flex-col" onClick={(e) => e.stopPropagation()}>
+                        {obj.keyResults.map((kr) => {
+                          const krDone = kr.progress >= 100;
+                          const krOverdue = kr.dueDate && new Date(kr.dueDate) < new Date() && !krDone;
+                          return (
+                            <div key={kr.id} className="group/kr flex items-center gap-2.5 px-3 py-2 border-b border-border/5 last:border-0 hover:bg-muted/10 transition-colors">
+                              <button
+                                onClick={() => setObjs(prev => prev.map(o => o.id === obj.id ? {
+                                  ...o,
+                                  keyResults: o.keyResults.map(k => k.id === kr.id ? { ...k, progress: krDone ? 0 : 100, status: krDone ? "behind" : "on-track" } : k),
+                                } : o))}
+                                className={cn(
+                                  "h-3.5 w-3.5 shrink-0 rounded-[3px] border transition-all flex items-center justify-center",
+                                  krDone ? "border-emerald-500 bg-emerald-500" : "border-muted-foreground/25 hover:border-muted-foreground/60 bg-transparent",
+                                )}
+                              >
+                                {krDone && <Check className="h-2 w-2 text-background stroke-[3]" />}
+                              </button>
+                              {editingObjectiveKR?.objId === obj.id && editingObjectiveKR?.krId === kr.id ? (
+                                <div className="flex-1 min-w-0">
+                                  <InlineInput
+                                    placeholder="Milestone title..."
+                                    initialValue={editDraft || kr.title}
+                                    onSubmit={(val) => { setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, keyResults: o.keyResults.map(k => k.id === kr.id ? { ...k, title: val } : k) } : o)); setEditingObjectiveKR(null); setEditDraft(""); }}
+                                    onCancel={() => { setEditingObjectiveKR(null); setEditDraft(""); }}
+                                  />
+                                </div>
+                              ) : (
+                                <button
+                                  onDoubleClick={() => { setEditingObjectiveKR({ objId: obj.id, krId: kr.id }); setEditDraft(kr.title); }}
+                                  className={cn("text-left text-[11px] flex-1 min-w-0 truncate leading-tight", krDone ? "text-muted-foreground/35 line-through" : "text-foreground/80")}
+                                >
+                                  {kr.title}
+                                </button>
+                              )}
+                              {kr.dueDate && (
+                                <span className={cn(
+                                  "shrink-0 text-[7px] font-mono px-1 py-0.5 rounded border",
+                                  krOverdue ? "text-rose-400 border-rose-500/25 bg-rose-500/8" : "text-muted-foreground/45 border-border/15"
+                                )}>
+                                  {new Date(kr.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                                </span>
+                              )}
+                              <div className="flex items-center gap-1.5 opacity-0 group-hover/kr:opacity-100 transition-opacity shrink-0">
+                                <DatePicker
+                                  value={kr.dueDate ?? ""}
+                                  onChange={(v) => setObjs(prev => prev.map(o => o.id === obj.id ? { ...o, keyResults: o.keyResults.map(k => k.id === kr.id ? { ...k, dueDate: v || null } : k) } : o))}
+                                  placeholder="Due date"
+                                />
+                                <button onClick={() => deleteKRFromObj(obj.id, kr.id)} className="p-0.5 text-muted-foreground/35 hover:text-rose-500 transition-colors">
+                                  <Trash2 className="h-2.5 w-2.5 stroke-[1.5]" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {/* Add milestone */}
+                        {addingKR === obj.id ? (
+                          <div className="px-5 py-3 flex flex-col gap-2 bg-muted/10">
+                            <InlineInput placeholder="New milestone..." onSubmit={val => addKRToObj(obj.id, val)} onCancel={() => { setAddingKR(null); setAddKrDueDate(""); }} />
+                            <DatePicker value={addKrDueDate} onChange={setAddKrDueDate} placeholder="Due date" />
+                          </div>
+                        ) : (
+                          <button onClick={() => setAddingKR(obj.id)} className="flex items-center gap-1.5 px-5 py-3 text-[9px] font-mono uppercase tracking-widest text-muted-foreground/50 hover:text-foreground transition-colors hover:bg-muted/10">
+                            <Plus className="h-3 w-3 stroke-2" /> Add milestone
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
 
             {/* Add Objective */}
             {addingObj ? (
-              <div className="bg-background border border-emerald-500/30 rounded-xl p-4 shadow-sm mt-2 mb-4">
-                {/* Tier selector */}
+              <div className="border border-border/20 bg-background rounded-xl p-4 shrink-0 shadow-sm mt-1">
                 <div className="flex items-center gap-2 mb-3">
-                  <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">Tier:</span>
-                  <div className="flex items-center bg-muted/30 rounded-md p-0.5">
-                    {tierList.map(t => (
-                      <button 
-                        key={t} 
-                        onClick={() => setAddObjTier(t)} 
-                        className={cn(
-                          "px-2 py-1 text-[9px] font-mono uppercase tracking-widest rounded transition-all", 
-                          addObjTier === t ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-                        )}
-                      >
-                        {t}
-                      </button>
-                    ))}
+                  {tierList.map(t => (
+                    <button key={t} onClick={() => setAddObjTier(t)} className={cn(
+                      "px-2.5 py-1 text-[9px] font-mono uppercase tracking-widest rounded-md border transition-all",
+                      addObjTier === t ? "bg-foreground text-background border-foreground shadow-sm" : "border-border/25 text-muted-foreground hover:text-foreground"
+                    )}>{t}</button>
+                  ))}
+                  <div className="ml-auto flex items-center gap-3">
+                    <ColorPicker value={addObjColor} onChange={setAddObjColor} label="Color" />
+                    <DatePicker value={addObjDueDate} onChange={setAddObjDueDate} placeholder="Due date" />
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-4 mb-3">
-                  <div className="flex items-center gap-2">
-                    <label className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">Linked KR</label>
-                    <select
-                      value={addObjLinkId ?? ""}
-                      onChange={(e) => setAddObjLinkId(e.target.value || null)}
-                      className="text-[10px] font-mono bg-muted/20 border border-border/30 rounded-md px-2 py-1 text-foreground outline-none"
-                    >
-                      {northStarKRs.map((kr) => (
-                        <option key={kr.id} value={kr.id}>{kr.title}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">Color</label>
-                    <input
-                      type="color"
-                      value={addObjColor}
-                      onChange={(e) => setAddObjColor(e.target.value)}
-                      className="h-6 w-6 rounded cursor-pointer border border-border/30 bg-transparent p-0 outline-none"
-                    />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">Due Date</label>
-                    <input
-                      type="date"
-                      value={addObjDueDate}
-                      onChange={(e) => setAddObjDueDate(e.target.value)}
-                      className="text-[10px] font-mono bg-muted/20 border border-border/30 rounded-md px-2 py-1 text-foreground outline-none"
-                    />
-                  </div>
-                </div>
-                <div className="pt-2 border-t border-border/10">
-                  <InlineInput placeholder="Objective title..." onSubmit={addObj} onCancel={() => setAddingObj(false)} />
-                </div>
+                {northStarKRs.length > 0 && (
+                  <select
+                    value={addObjLinkId ?? ""}
+                    onChange={(e) => setAddObjLinkId(e.target.value || null)}
+                    className="w-full text-[10px] font-mono bg-muted/10 border border-border/25 rounded-md px-2.5 py-1.5 text-foreground outline-none mb-3"
+                  >
+                    <option value="">No linked KR</option>
+                    {northStarKRs.map((kr) => (<option key={kr.id} value={kr.id}>{kr.title}</option>))}
+                  </select>
+                )}
+                <InlineInput placeholder="Objective title..." onSubmit={addObj} onCancel={() => setAddingObj(false)} />
               </div>
             ) : (
-              northStarKRs.length > 0 ? (
-                <button 
-                  onClick={() => setAddingObj(true)} 
-                  className="w-full flex items-center justify-center gap-2 p-3 mt-2 mb-4 border border-dashed border-border/40 rounded-xl text-[10px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground hover:border-border/60 hover:bg-muted/20 transition-all"
-                >
-                  <Plus className="h-3 w-3 stroke-2" /> New Objective
-                </button>
-              ) : (
-                <div className="flex items-center justify-center p-4 mt-2 mb-4 border border-dashed border-border/40 rounded-xl text-[10px] font-mono uppercase tracking-widest text-muted-foreground/70">
-                  Add a main KR first to create objectives
-                </div>
-              )
+              <button
+                onClick={() => setAddingObj(true)}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 mt-1 border border-dashed border-border/30 rounded-xl text-[10px] font-mono uppercase tracking-widest text-muted-foreground/60 hover:text-foreground hover:bg-muted/10 hover:border-border/50 transition-all shrink-0"
+              >
+                <Plus className="h-3.5 w-3.5 stroke-2" /> New Objective
+              </button>
             )}
           </div>
         </div>
 
         {/* ─── COL 3: BURNDOWN + STATUS ─── */}
-        <div className="flex flex-col gap-6 min-h-0 overflow-hidden">
+        <div className="flex flex-col gap-6 xl:gap-8 min-h-0 overflow-hidden">
 
           {/* Burndown */}
           <div className="flex flex-col border border-border/20 bg-background/60 backdrop-blur-xl flex-1 min-h-0 rounded-2xl shadow-sm overflow-hidden">
-            <SectionHead title="Burndown" icon={TrendingUp} badge={<span className="text-[9px] font-mono text-muted-foreground bg-muted/40 px-1.5 py-0.5 rounded">Q4</span>} />
+            <SectionHead
+              title="Burndown"
+              icon={TrendingUp}
+              badge={
+                <span className="text-[9px] font-mono text-muted-foreground bg-muted/40 px-1.5 py-0.5 rounded tabular-nums">
+                  {objs.flatMap(o => o.keyResults).filter(k => k.progress >= 100).length}
+                  /{objs.flatMap(o => o.keyResults).length} done
+                </span>
+              }
+            />
+            {/* Sprint date range pickers */}
+            <div className="flex items-center gap-3 px-4 py-2 border-b border-border/10 bg-muted/5">
+              <span className="text-[8px] font-mono uppercase tracking-widest text-muted-foreground shrink-0">From</span>
+              <DatePicker value={sprintStart} onChange={setSprintStart} placeholder="Start date" />
+              <span className="text-[8px] font-mono text-muted-foreground/40">/</span>
+              <DatePicker value={sprintEnd} onChange={setSprintEnd} placeholder="End date" />
+            </div>
             <div className="flex-1 min-h-0 p-3 pb-0">
               {burndownData.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={burndownData} margin={{ top: 10, right: 12, left: 10, bottom: 4 }}>
+                  <AreaChart data={burndownData} margin={{ top: 10, right: 12, left: -14, bottom: 4 }}>
                     <defs>
                       <linearGradient id="burnPlanned" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--color-muted-foreground)" stopOpacity={0.1} />
+                        <stop offset="0%" stopColor="var(--color-muted-foreground)" stopOpacity={0.12} />
                         <stop offset="100%" stopColor="var(--color-muted-foreground)" stopOpacity={0} />
                       </linearGradient>
                       <linearGradient id="burnActual" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--color-rose-500)" stopOpacity={0.15} />
-                        <stop offset="100%" stopColor="var(--color-rose-500)" stopOpacity={0} />
+                        <stop offset="0%" stopColor="#6366f1" stopOpacity={0.2} />
+                        <stop offset="100%" stopColor="#6366f1" stopOpacity={0} />
                       </linearGradient>
                     </defs>
-                    <XAxis dataKey="w" axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: "var(--color-muted-foreground)", fontWeight: 500 }} dy={5} />
-                    <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="2 2" opacity={0.2} />
-                    <RechartsTooltip contentStyle={{ borderRadius: "0", border: "1px solid var(--color-border)", backgroundColor: "var(--color-background)", boxShadow: "none", fontSize: "11px", fontFamily: "monospace", padding: "6px 10px" }} />
-                    <Area type="monotone" dataKey="planned" stroke="var(--color-muted-foreground)" strokeWidth={1.5} strokeDasharray="4 4" fillOpacity={1} fill="url(#burnPlanned)" dot={false} />
-                    <Area type="monotone" dataKey="actual" stroke="var(--color-rose-500)" strokeWidth={2} fillOpacity={1} fill="url(#burnActual)" dot={{ r: 2, fill: "var(--color-rose-500)", stroke: "var(--color-background)", strokeWidth: 2 }} />
+                    <XAxis dataKey="label" axisLine={false} tickLine={false} tick={{ fontSize: 8, fill: "var(--color-muted-foreground)", fontWeight: 500 }} dy={5} interval="preserveStartEnd" />
+                    <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="2 2" opacity={0.15} />
+                    <RechartsTooltip
+                      contentStyle={{ borderRadius: "8px", border: "1px solid var(--color-border)", backgroundColor: "var(--color-background)", boxShadow: "0 4px 24px rgba(0,0,0,0.12)", fontSize: "10px", fontFamily: "monospace", padding: "8px 12px" }}
+                      formatter={((value: any, name: any) => [value === null ? "—" : `${value} remaining`, name === "planned" ? "Ideal" : "Actual"]) as any}
+                      labelStyle={{ fontWeight: 600, marginBottom: 4 }}
+                    />
+                    <Area type="monotone" dataKey="planned" stroke="var(--color-muted-foreground)" strokeWidth={1.5} strokeDasharray="4 3" fillOpacity={1} fill="url(#burnPlanned)" dot={false} connectNulls={false} />
+                    <Area type="monotone" dataKey="actual" stroke="#6366f1" strokeWidth={2} fillOpacity={1} fill="url(#burnActual)" dot={{ r: 2.5, fill: "#6366f1", stroke: "var(--color-background)", strokeWidth: 2 }} connectNulls={false} />
                   </AreaChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="flex h-full items-center justify-center text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
-                  No burndown data yet
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+                  <TrendingUp className="h-6 w-6 stroke-[1.5] text-muted-foreground/20" />
+                  <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground/50">
+                    Set a date range to track burndown
+                  </span>
                 </div>
               )}
             </div>
             <div className="flex items-center gap-4 px-4 py-2 border-t border-border/20">
-              <span className="flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-widest text-muted-foreground"><div className="w-3 h-[2px] border-t border-dashed border-muted-foreground" /> Planned</span>
-              <span className="flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-widest text-muted-foreground"><div className="w-3 h-[2px] bg-rose-500/60" /> Actual</span>
+              <span className="flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-widest text-muted-foreground"><div className="w-3 h-[2px] border-t border-dashed border-muted-foreground" /> Ideal</span>
+              <span className="flex items-center gap-1.5 text-[8px] font-mono uppercase tracking-widest text-muted-foreground"><div className="w-3 h-[2px] rounded" style={{ backgroundColor: "#6366f1", opacity: 0.7 }} /> Actual</span>
+              <span className="ml-auto text-[8px] font-mono text-muted-foreground/50 tabular-nums">milestones remaining</span>
             </div>
           </div>
 
