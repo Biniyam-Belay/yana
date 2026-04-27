@@ -1,12 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { 
   Clock, Play, Plus, CheckSquare, Square, History, ArrowUpRight, ArrowDownRight,
   Activity, Zap, Briefcase, Wallet, Target, TrendingUp,
   Flame, GitBranch, CalendarDays, Timer, Layers, FileText, Pause, RotateCcw,
   Cpu, Database, ChevronRight, Bookmark, Expand, X, Eye, EyeOff,
-  Flag, Crosshair, CheckCircle2, Circle, AlertTriangle
+  Flag, Crosshair, CheckCircle2, Circle, AlertTriangle, Info
 } from "lucide-react";
 import { 
   AreaChart, Area, XAxis, YAxis, ResponsiveContainer, CartesianGrid,
@@ -104,14 +105,67 @@ function SectionHead({ title, icon: Icon, iconColor, badge, onExpand }: { title:
   );
 }
 
-export default function HUDPage() {
-  const { northStar, northStarKRs, objectives, avgProgress, northStarProgress, topObjective, isReady: northStarReady } = useNorthStar();
-  const { executionRate, focusQuality, systemHealth, stressCoefficient, alignmentScore } = useAppStore();
+function useAnimatedNumber(target: number, stiffness = 0.18) {
+  const [value, setValue] = useState(target);
+  const frameRef = useRef<number | null>(null);
+  const targetRef = useRef(target);
+  const valueRef = useRef(target);
+  const canAnimateRef = useRef(false);
 
-  // Mission Velocity Algorithm (Vm)
-  const Vm = (executionRate * focusQuality) * (systemHealth * stressCoefficient);
-  const isDrift = alignmentScore < 0.85 || Vm < 0.75;
-  const isCriticalStasis = Vm < 0.40;
+  useEffect(() => {
+    // Grace period on initial mount to snap immediately while fetching
+    const t = setTimeout(() => {
+      canAnimateRef.current = true;
+    }, 800);
+    return () => clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    targetRef.current = target;
+    if (frameRef.current !== null) return;
+
+    if (!canAnimateRef.current) {
+      valueRef.current = target;
+      setValue(target);
+      return;
+    }
+
+    const tick = () => {
+      const current = valueRef.current;
+      const dest = targetRef.current;
+      const delta = dest - current;
+
+      if (Math.abs(delta) < 0.5) {
+        const snap = Math.round(dest);
+        valueRef.current = snap;
+        setValue(snap);
+        frameRef.current = null;
+        return;
+      }
+
+      const next = current + delta * stiffness;
+      valueRef.current = next;
+      setValue(Math.round(next));
+      frameRef.current = requestAnimationFrame(tick);
+    };
+
+    frameRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+      }
+      frameRef.current = null;
+    };
+  }, [target, stiffness]);
+
+  return value;
+}
+
+export default function HUDPage() {
+  const router = useRouter();
+  const { northStar, northStarKRs, objectives, avgProgress, northStarProgress, alignmentScore, topObjective, isReady: northStarReady } = useNorthStar();
+  const { executionRate, focusQuality, systemHealth, stressCoefficient } = useAppStore();
 
   const [expandedSection, setExpandedSection] = useState<string | null>(null);
   const [fabOpen, setFabOpen] = useState(false);
@@ -192,9 +246,13 @@ export default function HUDPage() {
     ...northStarKRs,
     ...objectives.flatMap((o) => o.keyResults),
   ];
+  // Consolidate all granular work items (Milestones, NS Key Results, and Professional Tasks)
   const objectiveTasks = useMemo(
-    () => objectives.flatMap((objective) => objective.keyResults.map((milestone) => ({ ...milestone, objectiveTitle: objective.title }))),
-    [objectives],
+    () => [
+      ...northStarKRs.map(kr => ({ ...kr, objectiveTitle: "North Star" })),
+      ...objectives.flatMap((objective) => objective.keyResults.map((milestone) => ({ ...milestone, objectiveTitle: objective.title })))
+    ],
+    [objectives, northStarKRs],
   );
   const objectiveNameById = useMemo(
     () => Object.fromEntries(objectives.map((objective) => [objective.id, objective.title])),
@@ -257,6 +315,28 @@ export default function HUDPage() {
   const professionalCompletionRate = professionalTasks.length > 0
     ? Math.round((professionalDoneCount / professionalTasks.length) * 100)
     : 0;
+
+  // ── Mission Velocity Algorithm (Vm) ──
+  // Now derived dynamically from real-time traction and seamless loaded data
+  const computedExecutionRate = professionalTasks.length > 0 ? Math.max(0.5, professionalCompletionRate / 100) : executionRate;
+  const computedSystemHealth = avgProgress > 0 ? Math.max(0.5, avgProgress / 100) : systemHealth;
+  const Vm = (computedExecutionRate * focusQuality) * (computedSystemHealth * stressCoefficient);
+  const isDrift = alignmentScore < 85 || Vm < 0.75;
+  const isCriticalStasis = Vm < 0.40;
+
+  // ── Animated Metrics ──
+  const animatedVm = useAnimatedNumber(Vm * 100);
+  const animatedAvgProgress = useAnimatedNumber(avgProgress);
+  const animatedProTasks = useAnimatedNumber(professionalTasks.length);
+  const animatedProDoneCount = useAnimatedNumber(professionalDoneCount);
+  const animatedOnTrackCount = useAnimatedNumber(onTrackCount);
+  const animatedAtRiskCount = useAnimatedNumber(atRiskCount);
+  const animatedBehindCount = useAnimatedNumber(behindCount);
+  const animatedNorthStarProgress = useAnimatedNumber(northStarProgress);
+  const animatedTotalKRs = useAnimatedNumber(totalKRs);
+  const animatedProfessionalOpenCount = useAnimatedNumber(professionalOpenCount);
+  const animatedProfessionalCompletionRate = useAnimatedNumber(professionalCompletionRate);
+
   const todayProfessionalTasks = useMemo(() => {
     const now = new Date();
     const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
@@ -302,39 +382,7 @@ export default function HUDPage() {
   const heatmapCycles = heatmapData.length ? heatmapData.length * 32 : 0;
   const overviewReady = northStarReady && timerReady;
 
-  const readExecutionTasksFromLocal = () => {
-    if (typeof window === "undefined") return;
-
-    const raw = localStorage.getItem(PROF_TASK_KEY);
-    if (!raw) {
-      setExecutionTasks([]);
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(raw) as Array<{
-        id: string;
-        title: string;
-        status: string;
-        dueDate?: string;
-        objectiveId?: string | null;
-        updatedAt?: string;
-      }>;
-
-      setExecutionTasks(
-        parsed.map((task) => ({
-          id: task.id,
-          title: task.title,
-          status: task.status,
-          dueDate: task.dueDate ?? null,
-          objectiveId: task.objectiveId ?? null,
-          updatedAt: task.updatedAt ?? null,
-        })),
-      );
-    } catch {
-      setExecutionTasks([]);
-    }
-  };
+  // Removed readExecutionTasksFromLocal to strictly rely on Supabase real-time data
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -534,32 +582,7 @@ export default function HUDPage() {
     }
   }, []);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
 
-    readExecutionTasksFromLocal();
-
-    const onStorage = (event: StorageEvent) => {
-      if (event.key && event.key !== PROF_TASK_KEY) return;
-      readExecutionTasksFromLocal();
-    };
-
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") {
-        readExecutionTasksFromLocal();
-      }
-    };
-
-    window.addEventListener("storage", onStorage);
-    window.addEventListener("focus", readExecutionTasksFromLocal);
-    document.addEventListener("visibilitychange", onVisibility);
-
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", readExecutionTasksFromLocal);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, []);
 
   useEffect(() => {
     if (!supabaseAvailable || !supabaseRef.current) return;
@@ -575,13 +598,13 @@ export default function HUDPage() {
   useEffect(() => {
     if (!supabaseUserId || !supabaseRef.current) return;
 
-    supabaseRef.current
-      .from("professional_tasks")
-      .select("id, title, status, due_date, objective_id, updated_at")
-      .eq("user_id", supabaseUserId)
-      .then(({ data, error }: { data: any, error: any }) => {
-        if (error || !data) return;
-
+    const fetchTasks = async () => {
+      const { data, error } = await supabaseRef.current!
+        .from("professional_tasks")
+        .select("id, title, status, due_date, objective_id, updated_at")
+        .eq("user_id", supabaseUserId);
+        
+      if (!error && data) {
         setExecutionTasks(
           data.map((task: any) => ({
             id: task.id,
@@ -592,7 +615,19 @@ export default function HUDPage() {
             updatedAt: task.updated_at,
           })),
         );
-      });
+      }
+    };
+    
+    fetchTasks();
+
+    const tasksSub = supabaseRef.current
+      .channel("overview_tasks_changes")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "professional_tasks", filter: `user_id=eq.${supabaseUserId}` },
+        () => fetchTasks()
+      )
+      .subscribe();
 
     supabaseRef.current
       .from("focus_timer_sessions")
@@ -621,6 +656,10 @@ export default function HUDPage() {
         setTimerSessions(mapped);
         setTimerReady(true);
       });
+      
+    return () => {
+      supabaseRef.current?.removeChannel(tasksSub);
+    };
   }, [supabaseUserId]);
 
   useEffect(() => {
@@ -750,7 +789,7 @@ export default function HUDPage() {
       return {
         metric: (Vm * 100).toFixed(1) + "%",
         label: "Sync Consistency",
-        constraint: `Vector Drift Risk: ${(1 - alignmentScore).toFixed(4)}`,
+        constraint: `Vector Drift Risk: ${(100 - alignmentScore).toFixed(0)}%`,
         designation: "Operating Matrix"
       };
     }
@@ -850,12 +889,10 @@ export default function HUDPage() {
   ]);
 
   const fabItems = [
-    { label: "Engine Task", icon: CheckSquare, color: "bg-indigo-600 text-white shadow-[0_2px_12px_rgba(79,70,229,0.4)]" },
-    { label: "Micro Block", icon: Timer, color: "bg-cyan-500 text-white shadow-[0_2px_12px_rgba(6,182,212,0.4)]" },
-    { label: "Log Pulse", icon: Activity, color: "bg-violet-500 text-white shadow-[0_2px_12px_rgba(139,92,246,0.4)]" },
-    { label: "Fuel Flow", icon: Wallet, color: "bg-emerald-500 text-white shadow-[0_2px_12px_rgba(16,185,129,0.4)]" },
-    { label: "Strategy KR", icon: Flag, color: "bg-rose-500 text-white shadow-[0_2px_12px_rgba(244,63,94,0.4)]" },
-    { label: "Macro Target", icon: Target, color: "bg-amber-500 text-white shadow-[0_2px_12px_rgba(245,158,11,0.4)]" },
+    { label: "Engine Task", icon: CheckSquare, color: "bg-indigo-600 text-white shadow-[0_2px_12px_rgba(79,70,229,0.4)]", action: () => router.push("/tactical?add=task") },
+    { label: "Micro Block", icon: Timer, color: "bg-cyan-500 text-white shadow-[0_2px_12px_rgba(6,182,212,0.4)]", action: () => setExpandedSection("Timer Control") },
+    { label: "Strategy KR", icon: Flag, color: "bg-rose-500 text-white shadow-[0_2px_12px_rgba(244,63,94,0.4)]", action: () => router.push("/north-star?add=kr") },
+    { label: "Macro Target", icon: Target, color: "bg-amber-500 text-white shadow-[0_2px_12px_rgba(245,158,11,0.4)]", action: () => router.push("/north-star?add=objective") },
   ];
 
   return (
@@ -892,7 +929,7 @@ export default function HUDPage() {
             <div className="flex items-center gap-3 shrink-0 relative z-10 border-l border-border/20 pl-3 ml-2">
                <div className="flex flex-col items-end">
                  <span className="text-[7px] opacity-50 leading-none">PROGRESS</span>
-                 <span className="text-[11px] font-bold tabular-nums text-foreground">{northStarProgress}%</span>
+                 <span className="text-[11px] font-bold tabular-nums text-foreground">{animatedNorthStarProgress}%</span>
                </div>
             </div>
           </div>
@@ -906,43 +943,50 @@ export default function HUDPage() {
                 "flex items-center gap-2 hidden lg:flex text-rose-500 font-bold bg-rose-500/10 px-2 py-1 border border-rose-500/30",
                 introAnimations && "animate-pulse"
               )}>
-                <AlertTriangle className="h-3 w-3 stroke-[2]" /> CRITICAL — Vm {(Vm * 100).toFixed(0)}%
+                <AlertTriangle className="h-3 w-3 stroke-[2]" /> CRITICAL — Vm {animatedVm}%
               </span>
             ) : isDrift ? (
                <span className="flex items-center gap-2 hidden lg:flex text-amber-500 font-bold bg-amber-500/10 px-2 py-1 border border-amber-500/30">
-                 <Activity className="h-3 w-3 stroke-[2]" /> DRIFT — Vm {(Vm * 100).toFixed(0)}%
+                 <Activity className="h-3 w-3 stroke-[2]" /> DRIFT — Vm {animatedVm}%
                </span>
             ) : (
               <span className="flex items-center gap-2 hidden lg:flex text-emerald-500/80 font-bold">
-                 <Activity className="h-3 w-3 stroke-[1.5]" /> Vm {(Vm * 100).toFixed(0)}%
+                 <Activity className="h-3 w-3 stroke-[1.5]" /> Vm {animatedVm}%
               </span>
             )}
 
             <div className="hidden xl:flex items-center gap-4 border-l border-border/20 pl-4">
               <div className="flex flex-col items-center">
                 <span className="text-[7px] opacity-50">PRODUCTION</span>
-                <span className="text-[11px] font-bold">{avgProgress}%</span>
+                <span className="text-[11px] font-bold">{animatedAvgProgress}%</span>
               </div>
               <div className="flex flex-col items-center">
-                <span className="text-[7px] text-indigo-500/70">PRO TASKS</span>
-                <span className="text-[11px] font-bold text-indigo-500">{professionalTasks.length}</span>
+                <span className="text-[7px] text-indigo-500/70">SYNC TASKS</span>
+                <span className="text-[11px] font-bold text-indigo-500">{animatedProTasks}</span>
               </div>
               <div className="flex flex-col items-center">
-                <span className="text-[7px] text-emerald-500/70">PRO DONE</span>
-                <span className="text-[11px] font-bold text-emerald-500">{professionalDoneCount}</span>
+                <span className="text-[7px] text-emerald-500/70">SYNC DONE</span>
+                <span className="text-[11px] font-bold text-emerald-500">{animatedProDoneCount}</span>
               </div>
+              <div className="flex flex-col items-center">
+                <span className="text-[7px] text-emerald-500/70">PRO SYNC</span>
+                <span className="text-[11px] font-bold text-emerald-500">{animatedProfessionalCompletionRate}%</span>
+              </div>
+              
+              <div className="h-6 w-px bg-border/10 mx-1" />
+
               <div className="flex flex-col items-center">
                 <span className="text-[7px] text-emerald-500/70">ON TRACK</span>
-                <span className="text-[11px] font-bold text-emerald-500">{onTrackCount}</span>
+                <span className="text-[11px] font-bold text-emerald-500">{animatedOnTrackCount}</span>
               </div>
               <div className="flex flex-col items-center">
                 <span className="text-[7px] text-amber-500/70">AT RISK</span>
-                <span className="text-[11px] font-bold text-amber-500">{atRiskCount}</span>
+                <span className="text-[11px] font-bold text-amber-500">{animatedAtRiskCount}</span>
               </div>
               {behindCount > 0 && (
                 <div className="flex flex-col items-center">
                   <span className="text-[7px] text-rose-500/70">BEHIND</span>
-                  <span className="text-[11px] font-bold text-rose-500">{behindCount}</span>
+                  <span className="text-[11px] font-bold text-rose-500">{animatedBehindCount}</span>
                 </div>
               )}
             </div>
@@ -968,7 +1012,8 @@ export default function HUDPage() {
           )}>
             {fabItems.map((item, i) => (
               <button 
-                key={i} 
+                key={i}
+                onClick={item.action}
                 className={cn(
                   "group flex items-center justify-end gap-2.5 transition-all duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)]",
                   fabOpen ? "translate-y-0 opacity-100" : "-translate-y-3 opacity-0"
@@ -1000,26 +1045,40 @@ export default function HUDPage() {
       {/* ═══ KPI ROW ═══ */}
       <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         {[
-          { label: "Progress", val: `${northStarProgress}%`, trend: `Mission`, up: true, sparkColor: "var(--color-emerald-500)", id: "rev" },
-          { label: "Key Results", val: `${totalKRs}`, trend: `${highRiskKRs.length} At Risk`, up: highRiskKRs.length === 0, sparkColor: "var(--color-amber-500)", id: "kr" },
-          { label: "Focus Hrs", val: `${focusHours}h`, trend: `${timerSessions.length} sessions`, up: totalTrackedSeconds > 0, sparkColor: "var(--color-amber-500)", id: "focus" },
-          { label: "Pro Open", val: `${professionalOpenCount}`, trend: `${professionalDueSoonCount} due soon`, up: professionalDueSoonCount === 0, sparkColor: "var(--color-amber-500)", id: "pro-open" },
-          { label: "Pro Sync", val: `${professionalCompletionRate}%`, trend: professionalOverdueCount > 0 ? `${professionalOverdueCount} overdue` : "No overdue", up: professionalOverdueCount === 0, sparkColor: "var(--color-emerald-500)", id: "pro-sync" },
+          { label: "Progress", val: `${animatedNorthStarProgress}%`, trend: `Mission`, up: true, sparkColor: "var(--color-emerald-500)", id: "rev", desc: "Aggregate completion of all top-level North Star Key Results." },
+          { label: "KRs", val: `${animatedTotalKRs}`, trend: `${highRiskKRs.length} Risk`, up: highRiskKRs.length === 0, sparkColor: "var(--color-amber-500)", id: "kr", desc: "Total count of active Key Results across all objectives and the North Star." },
+          { label: "Sync Tasks", val: `${animatedProTasks}`, trend: `${professionalOpenCount} left`, up: professionalOpenCount === 0, sparkColor: "var(--color-indigo-500)", id: "pro-tasks", desc: "Total combined work surface including Engine tasks and Objective milestones." },
+          { label: "Sync Done", val: `${animatedProDoneCount}`, trend: `Executed`, up: true, sparkColor: "var(--color-emerald-500)", id: "pro-done", desc: "Quantity of individual work items successfully pushed to 100% completion." },
+          { label: "Pro Sync", val: `${animatedProfessionalCompletionRate}%`, trend: professionalOverdueCount > 0 ? `${professionalOverdueCount} overdue` : "Nominal", up: professionalOverdueCount === 0, sparkColor: "var(--color-emerald-500)", id: "pro-sync", desc: "Synchronization Rate: The actual percentage of your total execution committed vs finished." },
+          { label: "Focus Time", val: formatTimerDuration(totalTrackedSeconds), trend: `${timerSessions.length} sessions`, up: totalTrackedSeconds > 0, sparkColor: "var(--color-amber-500)", id: "focus", desc: "Total deep-work time recorded across all focused sessions." },
         ].map((kpi, i) => (
-          <div key={i} className="group relative flex flex-col border border-border/30 p-3.5 bg-background/60 backdrop-blur-sm hover:border-border/60 hover:bg-muted/10 transition-all cursor-pointer overflow-hidden">
-            <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground mb-2.5">{kpi.label}</span>
-            <div className="flex items-end justify-between gap-2">
-              <span className="text-xl font-semibold tracking-tighter text-foreground leading-none tabular-nums">{kpi.val}</span>
-              {miniSparkData.length > 0 ? (
-                <MiniSpark data={miniSparkData} color={kpi.sparkColor} id={kpi.id} />
-              ) : (
-                <div className="h-7 w-20 border border-border/20 bg-muted/10" />
-              )}
-            </div>
-            <span className={cn("text-[10px] font-semibold mt-2 flex items-center gap-1", kpi.up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>
-              {kpi.up ? <ArrowUpRight className="h-3 w-3 stroke-[2.5]" /> : <ArrowDownRight className="h-3 w-3 stroke-[2.5]" />}{kpi.trend}
-            </span>
-            <div className="absolute bottom-0 left-0 w-0 group-hover:w-full h-[2px] transition-all duration-300" style={{ backgroundColor: kpi.sparkColor }} />
+          <div key={i} className="group relative flex flex-col border border-border/30 p-3.5 bg-background/60 backdrop-blur-sm hover:border-border/60 hover:bg-muted/10 transition-all cursor-pointer overflow-hidden pb-3">
+             {/* MAIN CONTENT */}
+             <div className="flex flex-col h-full transition-opacity duration-300 group-hover:opacity-0">
+               <div className="flex items-center justify-between mb-2.5">
+                 <span className="text-[9px] font-mono uppercase tracking-widest text-muted-foreground">{kpi.label}</span>
+                 <Info className="h-2.5 w-2.5 text-muted-foreground/20" />
+               </div>
+               <div className="flex items-end justify-between gap-2">
+                 <span className="text-xl font-semibold tracking-tighter text-foreground leading-none tabular-nums">{kpi.val}</span>
+                 {miniSparkData.length > 0 ? (
+                   <MiniSpark data={miniSparkData} color={kpi.sparkColor} id={kpi.id} />
+                 ) : (
+                   <div className="h-7 w-20 border border-border/20 bg-muted/10" />
+                 )}
+               </div>
+               <span className={cn("text-[10px] font-semibold mt-auto flex items-center gap-1", kpi.up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>
+                 {kpi.up ? <ArrowUpRight className="h-3 w-3 stroke-[2.5]" /> : <ArrowDownRight className="h-3 w-3 stroke-[2.5]" />}{kpi.trend}
+               </span>
+             </div>
+
+             {/* INFO OVERLAY */}
+             <div className="absolute inset-0 z-20 bg-background/95 backdrop-blur-md p-4 opacity-0 group-hover:opacity-100 transition-all duration-300 flex flex-col justify-center pointer-events-none translate-y-2 group-hover:translate-y-0">
+                <span className="text-[8px] font-mono uppercase tracking-widest text-indigo-500 mb-1.5">{kpi.label} :: INTEL</span>
+                <p className="text-[10px] leading-snug text-foreground/90 font-medium text-left">{kpi.desc}</p>
+             </div>
+
+             <div className="absolute bottom-0 left-0 w-0 group-hover:w-full h-[2px] transition-all duration-300" style={{ backgroundColor: kpi.sparkColor }} />
           </div>
         ))}
       </div>

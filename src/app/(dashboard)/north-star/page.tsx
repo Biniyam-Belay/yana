@@ -430,10 +430,25 @@ function useAnimatedNumber(target: number, stiffness = 0.18) {
   const frameRef = useRef<number | null>(null);
   const targetRef = useRef(target);
   const valueRef = useRef(target);
+  const canAnimateRef = useRef(false);
+
+  useEffect(() => {
+    // Grace period on initial mount to snap immediately while fetching
+    const t = setTimeout(() => {
+      canAnimateRef.current = true;
+    }, 800);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     targetRef.current = target;
     if (frameRef.current !== null) return;
+
+    if (!canAnimateRef.current) {
+      valueRef.current = target;
+      setValue(target);
+      return;
+    }
 
     const tick = () => {
       const current = valueRef.current;
@@ -475,7 +490,7 @@ export default function NorthStarPage() {
     northStar, setNorthStar,
     northStarKRs, setNorthStarKRs,
     objectives: objs, setObjectives: setObjs,
-    avgProgress, northStarProgress, isReady,
+    avgProgress, northStarProgress, alignmentScore, isReady,
   } = useNorthStar();
 
   const [addingNorthStar, setAddingNorthStar] = useState(false);
@@ -575,69 +590,7 @@ export default function NorthStarPage() {
     });
     return sorted;
   }, [activeTier, mainKrTitleById, objs, objectiveQuery, objectiveSort, objectiveStatus]);
-  const alignmentScore = useMemo(() => {
-    if (objs.length === 0 && northStarKRs.length === 0) return 0;
 
-    const krBaseProgress = new Map<string, number>();
-
-    const objectivesByKr = objs.reduce<Map<string, typeof objs>>((acc, obj) => {
-      if (!obj.keyResultId) return acc;
-      const list = acc.get(obj.keyResultId) ?? [];
-      list.push(obj);
-      acc.set(obj.keyResultId, list);
-      return acc;
-    }, new Map());
-
-    northStarKRs.forEach((kr) => {
-      const linked = objectivesByKr.get(kr.id) ?? [];
-      if (linked.length > 0) {
-        const avg = Math.round(linked.reduce((sum, obj) => sum + obj.progress, 0) / linked.length);
-        krBaseProgress.set(kr.id, avg);
-      } else {
-        krBaseProgress.set(kr.id, kr.progress);
-      }
-    });
-
-    const linkedObjectives = objs.filter((o) => !!o.keyResultId && krBaseProgress.has(o.keyResultId));
-    const orphanObjectives = objs.length - linkedObjectives.length;
-
-    const linkageScore = objs.length > 0
-      ? Math.round((linkedObjectives.length / objs.length) * 100)
-      : 100;
-
-    const coherenceScore = linkedObjectives.length > 0
-      ? Math.round(
-          linkedObjectives.reduce((sum, obj) => {
-            const baseline = krBaseProgress.get(obj.keyResultId!) ?? 0;
-            return sum + Math.max(0, 100 - Math.abs(obj.progress - baseline));
-          }, 0) / linkedObjectives.length,
-        )
-      : (objs.length > 0 ? 0 : 100);
-
-    const overdueOpenCount = objs.filter((o) => {
-      if (!o.dueDate) return false;
-      return new Date(o.dueDate).getTime() < Date.now() && o.progress < 100;
-    }).length;
-
-    const orphanPenalty = objs.length > 0 ? Math.round((orphanObjectives / objs.length) * 15) : 0;
-    const overduePenalty = objs.length > 0 ? Math.round((overdueOpenCount / objs.length) * 25) : 0;
-
-    const structuralScore = Math.max(
-      0,
-      Math.min(100, Math.round((coherenceScore * 0.65) + (linkageScore * 0.35) - orphanPenalty - overduePenalty)),
-    );
-
-    // Progress traction gate: great structure cannot claim near-perfect alignment if execution is very low.
-    const tractionScore = Math.max(0, Math.min(100, Math.round((northStarProgress * 0.7) + (avgProgress * 0.3))));
-
-    // Heavily weight traction so low NS progress doesn't show "100% aligned".
-    const blendedScore = Math.round((structuralScore * 0.25) + (tractionScore * 0.75));
-
-    // Hard cap alignment based on traction envelope.
-    const tractionCap = Math.min(100, tractionScore + 15);
-
-    return Math.max(0, Math.min(blendedScore, tractionCap));
-  }, [objs, northStarKRs, northStarProgress, avgProgress]);
   const animatedAlignmentScore = useAnimatedNumber(alignmentScore);
   const animatedAlignmentDrift = useAnimatedNumber(Math.max(0, 100 - alignmentScore));
   const alignmentStatus = alignmentScore >= 80 ? "Aligned" : alignmentScore >= 55 ? "Drifting" : "Unstable";
@@ -1000,39 +953,40 @@ export default function NorthStarPage() {
               icon={Milestone} 
               badge={<span className="text-[9px] font-mono text-muted-foreground bg-muted/40 px-1.5 py-0.5 rounded-md border border-border/20 shadow-sm">{completedMilestonesCount}/{aggregatedMilestones.length}</span>} 
             />
-            <div ref={nextUpScrollRef} className="flex-1 flex flex-col min-h-0 overflow-y-auto scrollbar-hide p-3 gap-2 bg-muted/5">
+            <div ref={nextUpScrollRef} className="flex-1 flex flex-col min-h-0 overflow-y-auto scrollbar-hide bg-muted/5">
               {aggregatedMilestones.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-4">
+                <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-4 py-8">
                   <Milestone className="h-6 w-6 stroke-[1.5] text-muted-foreground/30" />
                   <span className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground/50">No milestones</span>
                 </div>
-              ) : aggregatedMilestones.map(m => (
-                <div key={m.id} className="group flex flex-col gap-2 px-3.5 py-3 rounded-xl border border-border/15 bg-background shadow-sm hover:border-border/30 hover:shadow-md transition-all cursor-pointer shrink-0">
-                  <div className="flex items-start gap-3">
-                    <button
-                      onClick={() => toggleNextUpMilestone(m.objId, m.id, m.progress)}
-                      className={cn(
-                        "mt-0.5 h-4 w-4 shrink-0 rounded-[4px] border-[1.5px] transition-all flex items-center justify-center",
-                        m.progress >= 100
-                          ? "border-emerald-500 bg-emerald-500"
-                          : "border-muted-foreground/30 hover:border-foreground/50 bg-transparent",
-                      )}
-                      aria-label={m.progress >= 100 ? "Mark milestone incomplete" : "Mark milestone complete"}
+              ) : aggregatedMilestones.map((m, idx) => (
+                <div key={m.id} className={cn(
+                  "group flex items-center gap-3 px-4 py-2.5 hover:bg-muted/10 transition-colors cursor-pointer shrink-0 overflow-hidden",
+                  idx > 0 && "border-t border-border/10"
+                )}>
+                  <button
+                    onClick={() => toggleNextUpMilestone(m.objId, m.id, m.progress)}
+                    className={cn(
+                      "h-3.5 w-3.5 shrink-0 rounded-[4px] border-[1.5px] transition-all flex items-center justify-center",
+                      m.progress >= 100
+                        ? "border-emerald-500 bg-emerald-500"
+                        : "border-muted-foreground/30 hover:border-foreground/50 bg-transparent",
+                    )}
+                    aria-label={m.progress >= 100 ? "Mark milestone incomplete" : "Mark milestone complete"}
+                  >
+                    {m.progress >= 100 && <Check className="h-2.5 w-2.5 text-background stroke-3" />}
+                  </button>
+                  <div className="flex flex-col flex-1 min-w-0 justify-center">
+                    <span
+                      className={cn("text-[11.5px] font-medium truncate w-full text-left leading-tight", m.progress >= 100 ? "text-muted-foreground/50 line-through decoration-muted-foreground/20" : "text-foreground")}
                     >
-                      {m.progress >= 100 && <Check className="h-3 w-3 text-background stroke-3" />}
-                    </button>
-                    <div className="flex flex-col flex-1 min-w-0 pr-2">
-                      <span
-                        className={cn("text-[12.5px] font-medium truncate w-full text-left leading-tight", m.progress >= 100 ? "text-muted-foreground/50 line-through decoration-muted-foreground/20" : "text-foreground")}
-                      >
-                        {m.title}
-                      </span>
+                      {m.title}
+                    </span>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <div className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: m.objColor ?? "#64748b" }} />
+                      <span className="text-[9px] font-medium text-muted-foreground/75 truncate">{m.objTitle}</span>
+                      <span className="text-[7.5px] font-mono border border-border/30 px-1 py-0 rounded text-muted-foreground/60 bg-muted/20 ml-1 leading-tight">{m.objTier}</span>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-2 pl-7">
-                    <div className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: m.objColor ?? "#64748b" }} />
-                    <span className="text-[9.5px] font-medium text-muted-foreground/75 truncate flex-1 leading-none">{m.objTitle}</span>
-                    <span className="text-[8px] font-mono border border-border/40 px-1.5 py-0.5 rounded text-muted-foreground/60 bg-muted/20">{m.objTier}</span>
                   </div>
                 </div>
               ))}
@@ -1406,24 +1360,27 @@ export default function NorthStarPage() {
           <div className="flex flex-col border border-border/20 bg-background/60 backdrop-blur-xl shrink-0 rounded-2xl shadow-sm overflow-hidden">
             <SectionHead title="Status" icon={Eye} />
             <div className="flex flex-col">
-              {([
-                { label: "On Track", status: "on-track" as Status, color: "bg-emerald-500/50", text: "text-emerald-500/70" },
-                { label: "At Risk", status: "at-risk" as Status, color: "bg-amber-500/50", text: "text-amber-500/70" },
-                { label: "Behind", status: "behind" as Status, color: "bg-rose-500/50", text: "text-rose-500/70" },
-              ] as const).map((s, i) => {
-                const count = objs.filter(o => o.status === s.status).length;
-                return (
-                  <div key={i} className="flex items-center gap-3 px-4 py-2.5 border-b border-border/10 last:border-0">
-                    <div className={cn("h-[6px] w-[6px] shrink-0", s.color)} />
-                    <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest flex-1">{s.label}</span>
-                    <span className={cn("text-[12px] font-mono font-bold tabular-nums", s.text)}>{count}</span>
-                    <div className="w-16 h-[2px] bg-border/20"><div className={cn("h-full", s.color)} style={{ width: `${totalObjs ? (count / totalObjs) * 100 : 0}%` }} /></div>
-                  </div>
-                );
-              })}
-                <div className="px-4 py-3 text-[9px] font-mono uppercase tracking-widest text-muted-foreground border-t border-border/10">
-                  {statusSummary}
-                </div>
+              <div className="grid grid-cols-3 divide-x divide-border/10 border-b border-border/10 bg-muted/5">
+                {([
+                  { label: "On Track", status: "on-track" as Status, color: "bg-emerald-500/50", text: "text-emerald-500/70" },
+                  { label: "At Risk", status: "at-risk" as Status, color: "bg-amber-500/50", text: "text-amber-500/70" },
+                  { label: "Behind", status: "behind" as Status, color: "bg-rose-500/50", text: "text-rose-500/70" },
+                ] as const).map((s, i) => {
+                  const count = objs.filter(o => o.status === s.status).length;
+                  return (
+                    <div key={i} className="flex flex-col items-center justify-center py-3.5">
+                      <div className="flex items-center gap-1.5 mb-1.5">
+                        <div className={cn("h-1.5 w-1.5 shrink-0 rounded-full", s.color)} />
+                        <span className="text-[8px] font-mono text-muted-foreground uppercase tracking-widest leading-none">{s.label}</span>
+                      </div>
+                      <span className={cn("text-[16px] font-mono font-bold tabular-nums leading-none", s.text)}>{count}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="px-4 py-2.5 text-[9px] font-mono uppercase tracking-widest text-muted-foreground text-center">
+                {statusSummary}
+              </div>
             </div>
           </div>
 

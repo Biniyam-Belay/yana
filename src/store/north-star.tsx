@@ -58,6 +58,8 @@ interface NorthStarContextValue extends NorthStarState {
   avgProgress: number;
   /** Derived: composite north star progress */
   northStarProgress: number;
+  /** Derived: Alignment score based on KRs, linked objs, and traction */
+  alignmentScore: number;
   /** Most relevant objective (highest progress, on-track) */
   topObjective: Objective | null;
 }
@@ -513,13 +515,72 @@ export function NorthStarProvider({ children }: { children: React.ReactNode }) {
     : 0;
   const topObjective = objectives.filter(o => o.status === "on-track").sort((a, b) => b.progress - a.progress)[0] ?? objectives[0] ?? null;
 
+  const alignmentScore = useMemo(() => {
+    if (objectives.length === 0 && northStarKRs.length === 0) return 0;
+
+    const krBaseProgress = new Map<string, number>();
+
+    const objectivesByKr = objectives.reduce<Map<string, typeof objectives>>((acc, obj) => {
+      if (!obj.keyResultId) return acc;
+      const list = acc.get(obj.keyResultId) ?? [];
+      list.push(obj);
+      acc.set(obj.keyResultId, list);
+      return acc;
+    }, new Map());
+
+    northStarKRs.forEach((kr) => {
+      const linked = objectivesByKr.get(kr.id) ?? [];
+      if (linked.length > 0) {
+        const avg = Math.round(linked.reduce((sum, obj) => sum + obj.progress, 0) / linked.length);
+        krBaseProgress.set(kr.id, avg);
+      } else {
+        krBaseProgress.set(kr.id, kr.progress);
+      }
+    });
+
+    const linkedObjectives = objectives.filter((o) => !!o.keyResultId && krBaseProgress.has(o.keyResultId));
+    const orphanObjectives = objectives.length - linkedObjectives.length;
+
+    const linkageScore = objectives.length > 0
+      ? Math.round((linkedObjectives.length / objectives.length) * 100)
+      : 100;
+
+    const coherenceScore = linkedObjectives.length > 0
+      ? Math.round(
+          linkedObjectives.reduce((sum, obj) => {
+            const baseline = krBaseProgress.get(obj.keyResultId!) ?? 0;
+            return sum + Math.max(0, 100 - Math.abs(obj.progress - baseline));
+          }, 0) / linkedObjectives.length,
+        )
+      : (objectives.length > 0 ? 0 : 100);
+
+    const overdueOpenCount = objectives.filter((o) => {
+      if (!o.dueDate) return false;
+      return new Date(o.dueDate).getTime() < Date.now() && o.progress < 100;
+    }).length;
+
+    const orphanPenalty = objectives.length > 0 ? Math.round((orphanObjectives / objectives.length) * 15) : 0;
+    const overduePenalty = objectives.length > 0 ? Math.round((overdueOpenCount / objectives.length) * 25) : 0;
+
+    const structuralScore = Math.max(
+      0,
+      Math.min(100, Math.round((coherenceScore * 0.65) + (linkageScore * 0.35) - orphanPenalty - overduePenalty)),
+    );
+
+    const tractionScore = Math.max(0, Math.min(100, Math.round((northStarProgress * 0.7) + (avgProgress * 0.3))));
+    const blendedScore = Math.round((structuralScore * 0.25) + (tractionScore * 0.75));
+    const tractionCap = Math.min(100, tractionScore + 15);
+
+    return Math.max(0, Math.min(blendedScore, tractionCap));
+  }, [objectives, northStarKRs, northStarProgress, avgProgress]);
+
   return (
     <NorthStarContext.Provider value={{
       northStar, northStarKRs, objectives,
       setNorthStar, setNorthStarKRs, setObjectives,
       deleteNorthStar,
       isReady,
-      avgProgress, northStarProgress, topObjective,
+      avgProgress, northStarProgress, alignmentScore, topObjective,
     }}>
       {children}
     </NorthStarContext.Provider>
